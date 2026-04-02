@@ -30,7 +30,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
     const uint8_t *payload = data + 2;
     int plen = len - 2;
 
-    poc_log("parse: session=%02x cmd=%02x len=%d", session, cmd, plen);
+    poc_log_at(POC_LOG_DEBUG, "parse: session=%02x cmd=%02x len=%d", session, cmd, plen);
 
     ctx->last_activity = poc_mono_ms();
 
@@ -64,7 +64,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         break;
 
     case CMD_HEARTBEAT:
-        poc_log("parse: heartbeat ack");
+        poc_log_at(POC_LOG_DEBUG, "parse: heartbeat ack");
         break;
 
     case CMD_NOTIFY_ENTER_GROUP:
@@ -100,7 +100,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 5) {
             uint32_t uid = poc_read32(payload);
             const char *name = (const char *)(payload + 4);
-            poc_log("mod_name: user=%u name=%.*s", uid, plen - 4, name);
+            poc_log_at(POC_LOG_DEBUG, "mod_name: user=%u name=%.*s", uid, plen - 4, name);
             /* fire groups_updated so the caller can re-query */
             poc_event_t evt = { .type = POC_EVT_GROUPS_UPDATED };
             poc_evt_push(&ctx->evt_queue, &evt);
@@ -111,7 +111,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 8) {
             uint32_t uid = poc_read32(payload);
             uint32_t gid = poc_read32(payload + 4);
-            poc_log("mod_def_group: user=%u group=%u", uid, gid);
+            poc_log_at(POC_LOG_DEBUG, "mod_def_group: user=%u group=%u", uid, gid);
         }
         break;
 
@@ -119,7 +119,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 5) {
             uint32_t uid = poc_read32(payload);
             int prio = payload[4];
-            poc_log("mod_priority: user=%u priority=%d", uid, prio);
+            poc_log_at(POC_LOG_DEBUG, "mod_priority: user=%u priority=%d", uid, prio);
         }
         break;
 
@@ -137,12 +137,12 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 8) {
             uint32_t gid = poc_read32(payload);
             uint32_t master = poc_read32(payload + 4);
-            poc_log("grp_mod_master: group=%u new_master=%u", gid, master);
+            poc_log_at(POC_LOG_DEBUG, "grp_mod_master: group=%u new_master=%u", gid, master);
         }
         break;
 
     case CMD_NOTIFY_PKG_ACK:
-        poc_log("pkg_ack: len=%d", plen);
+        poc_log_at(POC_LOG_DEBUG, "pkg_ack: len=%d", plen);
         break;
 
     /* ── Phase 2: temp groups + dispatch ── */
@@ -151,7 +151,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 8) {
             uint32_t gid = poc_read32(payload);
             uint32_t inviter = poc_read32(payload + 4);
-            poc_log("tmp_group_invite: group=%u inviter=%u", gid, inviter);
+            poc_log_at(POC_LOG_DEBUG, "tmp_group_invite: group=%u inviter=%u", gid, inviter);
             poc_event_t evt = { .type = POC_EVT_TMP_GROUP_INVITE,
                                 .tmp_group_invite = { .group_id = gid, .inviter_id = inviter }};
             poc_evt_push(&ctx->evt_queue, &evt);
@@ -161,7 +161,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
     case CMD_NOTIFY_ENTER_TMP:
         if (plen >= 4) {
             uint32_t gid = poc_read32(payload);
-            poc_log("tmp_group_enter: group=%u", gid);
+            poc_log_at(POC_LOG_DEBUG, "tmp_group_enter: group=%u", gid);
             ctx->active_group_id = gid;
             poc_event_t evt = { .type = POC_EVT_GROUPS_UPDATED };
             poc_evt_push(&ctx->evt_queue, &evt);
@@ -169,12 +169,12 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         break;
 
     case CMD_NOTIFY_LEAVE_TMP:
-        poc_log("tmp_group_leave");
+        poc_log_at(POC_LOG_DEBUG, "tmp_group_leave");
         ctx->active_group_id = 0;
         break;
 
     case CMD_NOTIFY_REJECT_TMP:
-        poc_log("tmp_group_rejected");
+        poc_log_at(POC_LOG_DEBUG, "tmp_group_rejected");
         break;
 
     case CMD_PULL_TO_GROUP:
@@ -213,11 +213,11 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
 
     case CMD_RECV_CONTENT:
     case CMD_RECV_MCAST:
-        poc_log("parse: content cmd=%02x len=%d (ignored on TCP)", cmd, plen);
+        poc_log_at(POC_LOG_DEBUG, "parse: content cmd=%02x len=%d (ignored on TCP)", cmd, plen);
         break;
 
     default:
-        poc_log("parse: unhandled cmd=%02x len=%d", cmd, plen);
+        poc_log_at(POC_LOG_DEBUG, "parse: unhandled cmd=%02x len=%d", cmd, plen);
         /* Hex dump first 32 bytes for debugging */
         {
             char hex[97];
@@ -225,7 +225,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
             for (int i = 0; i < dumplen; i++)
                 sprintf(hex + i * 3, "%02x ", payload[i]);
             hex[dumplen * 3] = '\0';
-            poc_log("  data: %s", hex);
+            poc_log_at(POC_LOG_DEBUG, "  data: %s", hex);
         }
         break;
     }
@@ -422,7 +422,7 @@ static void handle_force_exit(poc_ctx_t *ctx, const uint8_t *data, int len)
 static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
                                 const uint8_t *data, int len)
 {
-    poc_log("group_notify: cmd=%02x len=%d", cmd, len);
+    poc_log_at(POC_LOG_DEBUG, "group_notify: cmd=%02x len=%d", cmd, len);
 
     if (len < 4) return;
     uint32_t gid = poc_read32(data);
@@ -441,7 +441,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
             g->is_active = false;
             g->is_tmp = false;
             ctx->group_count++;
-            poc_log("group_notify: added group %u '%s'", gid, g->name);
+            poc_log_at(POC_LOG_DEBUG, "group_notify: added group %u '%s'", gid, g->name);
         }
         break;
 
@@ -450,7 +450,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
         for (int i = 0; i < ctx->group_count; i++) {
             if (ctx->groups[i].id == gid) {
                 ctx->groups[i] = ctx->groups[--ctx->group_count];
-                poc_log("group_notify: removed group %u", gid);
+                poc_log_at(POC_LOG_DEBUG, "group_notify: removed group %u", gid);
                 break;
             }
         }
@@ -464,7 +464,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
                 int copy = (nlen < 63 && 5 + nlen <= len) ? nlen : 0;
                 if (copy > 0) memcpy(ctx->groups[i].name, data + 5, copy);
                 ctx->groups[i].name[copy] = '\0';
-                poc_log("group_notify: renamed group %u -> '%s'", gid, ctx->groups[i].name);
+                poc_log_at(POC_LOG_DEBUG, "group_notify: renamed group %u -> '%s'", gid, ctx->groups[i].name);
                 break;
             }
         }
@@ -475,7 +475,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
         /* User joined group: [gid(4)][user_id(4)] */
         if (len >= 8) {
             uint32_t uid = poc_read32(data + 4);
-            poc_log("group_notify: user %u joined group %u", uid, gid);
+            poc_log_at(POC_LOG_DEBUG, "group_notify: user %u joined group %u", uid, gid);
             for (int i = 0; i < ctx->group_count; i++)
                 if (ctx->groups[i].id == gid) ctx->groups[i].user_count++;
         }
@@ -485,7 +485,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
         /* User left group: [gid(4)][user_id(4)] */
         if (len >= 8) {
             uint32_t uid = poc_read32(data + 4);
-            poc_log("group_notify: user %u left group %u", uid, gid);
+            poc_log_at(POC_LOG_DEBUG, "group_notify: user %u left group %u", uid, gid);
             for (int i = 0; i < ctx->group_count; i++)
                 if (ctx->groups[i].id == gid && ctx->groups[i].user_count > 0)
                     ctx->groups[i].user_count--;

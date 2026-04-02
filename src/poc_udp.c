@@ -74,7 +74,7 @@ int poc_udp_send(poc_ctx_t *ctx, const uint8_t *data, int len)
                    (struct sockaddr *)&ctx->udp_server,
                    sizeof(ctx->udp_server));
     if (n < 0) {
-        poc_log("udp: send error: %s", strerror(errno));
+        poc_log_at(POC_LOG_ERROR, "udp: send error: %s", strerror(errno));
         return POC_ERR_NETWORK;
     }
 
@@ -111,7 +111,7 @@ int poc_udp_recv(poc_ctx_t *ctx)
         }
 
         if (n < UDP_HDR_LEN) {
-            poc_log("udp: runt packet %d bytes", n);
+            poc_log_at(POC_LOG_WARNING, "udp: runt packet %d bytes", n);
             continue;
         }
 
@@ -153,7 +153,7 @@ int poc_udp_recv(poc_ctx_t *ctx)
             if (decoded > 0) {
                 if (!poc_ring_push(&ctx->rx_ring, pcm, decoded,
                                    sender_id, ctx->active_group_id)) {
-                    poc_log("udp: rx_ring full, dropping frame");
+                    poc_log_at(POC_LOG_WARNING, "udp: rx_ring full, dropping frame");
                 }
             }
         }

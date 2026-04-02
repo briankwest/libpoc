@@ -272,6 +272,7 @@ uint32_t    poc_read32(const uint8_t *p);
 void        poc_write16(uint8_t *p, uint16_t v);
 void        poc_write32(uint8_t *p, uint32_t v);
 void        poc_log(const char *fmt, ...);
+void        poc_log_at(int level, const char *fmt, ...);
 
 /* poc_crypto.c */
 void        poc_sha1(const char *input, char *hex_out);

@@ -1,5 +1,5 @@
 /*
- * poc_util.c — Byte order helpers, timers, logging
+ * poc_util.c — Byte order helpers, timers, logging with levels and callback
  */
 
 #include "poc_internal.h"
@@ -39,20 +39,64 @@ void poc_write32(uint8_t *p, uint32_t v)
     p[3] = v & 0xFF;
 }
 
-void poc_log(const char *fmt, ...)
+/* ── Logging with levels and callback ───────────────────────────── */
+
+static poc_log_fn g_log_fn = NULL;
+static void      *g_log_ud = NULL;
+static int        g_log_level = POC_LOG_DEBUG;
+
+void poc_set_log_callback(poc_log_fn fn, void *userdata)
 {
+    g_log_fn = fn;
+    g_log_ud = userdata;
+}
+
+void poc_set_log_level(int level)
+{
+    g_log_level = level;
+}
+
+void poc_log_at(int level, const char *fmt, ...)
+{
+    if (level > g_log_level)
+        return;
+
+    char buf[1024];
     va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    if (g_log_fn) {
+        g_log_fn(level, buf, g_log_ud);
+        return;
+    }
+
+    /* Default: stderr with timestamp and level tag */
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     struct tm tm;
     localtime_r(&ts.tv_sec, &tm);
 
-    fprintf(stderr, "[poc %02d:%02d:%02d.%03ld] ",
-            tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+    static const char *tags[] = {"ERR", "WRN", "INF", "DBG"};
+    const char *tag = (level >= 0 && level <= 3) ? tags[level] : "???";
 
+    fprintf(stderr, "[poc %02d:%02d:%02d.%03ld %s] %s\n",
+            tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000,
+            tag, buf);
+}
+
+/* Backward compat — poc_log() maps to INFO */
+void poc_log(const char *fmt, ...)
+{
+    if (POC_LOG_INFO > g_log_level)
+        return;
+
+    char buf[1024];
+    va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
 
-    fputc('\n', stderr);
+    poc_log_at(POC_LOG_INFO, "%s", buf);
 }

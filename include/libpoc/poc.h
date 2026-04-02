@@ -110,6 +110,18 @@ typedef struct {
     void *userdata;
 } poc_callbacks_t;
 
+/* ── Logging ────────────────────────────────────────────────────── */
+
+#define POC_LOG_ERROR    0
+#define POC_LOG_WARNING  1
+#define POC_LOG_INFO     2
+#define POC_LOG_DEBUG    3
+
+typedef void (*poc_log_fn)(int level, const char *msg, void *userdata);
+
+void poc_set_log_callback(poc_log_fn fn, void *userdata);
+void poc_set_log_level(int level);
+
 /* ── Lifecycle ──────────────────────────────────────────────────── */
 
 poc_ctx_t  *poc_create(const poc_config_t *cfg, const poc_callbacks_t *cb);

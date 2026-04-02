@@ -100,7 +100,7 @@ int poc_tcp_send_frame(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len)
         if (n < 0) {
             if (errno == EAGAIN || errno == EINTR)
                 continue;
-            poc_log("tcp: send error: %s", strerror(errno));
+            poc_log_at(POC_LOG_ERROR, "tcp: send error: %s", strerror(errno));
             return POC_ERR_NETWORK;
         }
         sent += n;
@@ -123,11 +123,11 @@ int poc_tcp_recv(poc_ctx_t *ctx)
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
             return POC_OK;
-        poc_log("tcp: recv error: %s", strerror(errno));
+        poc_log_at(POC_LOG_ERROR, "tcp: recv error: %s", strerror(errno));
         return POC_ERR_NETWORK;
     }
     if (n == 0) {
-        poc_log("tcp: connection closed by server");
+        poc_log_at(POC_LOG_WARNING, "tcp: connection closed by server");
         return POC_ERR_NETWORK;
     }
 
@@ -140,7 +140,7 @@ int poc_tcp_recv(poc_ctx_t *ctx)
     while (remaining >= MS_HDR_LEN + 1) {
         /* Validate magic */
         if (buf[0] != MS_MAGIC_0 || buf[1] != MS_MAGIC_1) {
-            poc_log("tcp: bad magic %02x %02x, resetting buffer", buf[0], buf[1]);
+            poc_log_at(POC_LOG_ERROR, "tcp: bad magic %02x %02x, resetting buffer", buf[0], buf[1]);
             remaining = 0;
             break;
         }

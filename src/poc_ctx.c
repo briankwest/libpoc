@@ -153,7 +153,7 @@ static bool io_try_reconnect(poc_ctx_t *ctx)
 
     int rc = poc_tcp_connect(ctx);
     if (rc != POC_OK) {
-        poc_log("io: reconnect TCP failed (%d)", rc);
+        poc_log_at(POC_LOG_WARNING, "io: reconnect TCP failed (%d)", rc);
         io_start_reconnect(ctx);  /* double the backoff */
         return false;
     }
@@ -242,7 +242,7 @@ static void *io_thread_fn(void *arg)
         }
 
         if (tcp_dead) {
-            poc_log("io: connection lost, starting reconnect");
+            poc_log_at(POC_LOG_ERROR, "io: connection lost, starting reconnect");
             io_start_reconnect(ctx);
             continue;
         }
@@ -605,7 +605,7 @@ int poc_ptt_send_audio(poc_ctx_t *ctx, const int16_t *pcm, int n_samples)
     while (offset + POC_AUDIO_FRAME_SAMPLES <= n_samples) {
         if (!poc_ring_push(&ctx->tx_ring, pcm + offset,
                            POC_AUDIO_FRAME_SAMPLES, 0, 0)) {
-            poc_log("ctx: tx_ring full, dropping frame");
+            poc_log_at(POC_LOG_WARNING, "ctx: tx_ring full, dropping frame");
             break;
         }
         offset += POC_AUDIO_FRAME_SAMPLES;
