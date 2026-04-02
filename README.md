@@ -226,7 +226,7 @@ All callbacks fire from the thread that calls `poc_poll()`, never from the I/O t
 
 ```
 ┌──────────────────────────┐       ┌──────────────────────────┐
-│       I/O Thread          │       │     Your Thread           │
+│       I/O Thread         │       │     Your Thread          │
 │                          │       │                          │
 │  poll(TCP, UDP, wakeup)  │       │  poc_poll(ctx, 0)        │
 │  ├─ TCP recv → deframe   │       │  ├─ drain evt_queue      │
@@ -236,7 +236,7 @@ All callbacks fire from the thread that calls `poc_poll()`, never from the I/O t
 │  ├─ drain tx_ring ◀──────┼───────┼──┤                       │
 │  │  → encode → encrypt   │       │  │  poc_ptt_send_audio() │
 │  │  → UDP send           │       │  │  → push to tx_ring    │
-│  ├─ heartbeat timer      │       │  └──────────────────────  │
+│  ├─ heartbeat timer      │       │  └────────────────────── │
 │  └─ GPS timer            │       └──────────────────────────┘
 └──────────────────────────┘
 
@@ -282,16 +282,16 @@ Client                          Server
   │                                │
   │◀── UserData (groups, users) ───┤
   │                                │
-  ╞══ ONLINE ═════════════════════╡
+  ╞══ ONLINE ══════════════════════╡
 ```
 
 ### UDP Voice Packets
 
 ```
-┌────────┬──────────┬─────┬──────┬──────────────┐
+┌────────┬──────────┬─────┬──────┬───────────────┐
 │ SeqNum │ SenderID │ Pad │ Type │ Audio Payload │
 │ 2B BE  │  4B BE   │ 1B  │  1B  │   20 bytes    │
-└────────┴──────────┴─────┴──────┴──────────────┘
+└────────┴──────────┴─────┴──────┴───────────────┘
 ```
 
 ## Test Suite
