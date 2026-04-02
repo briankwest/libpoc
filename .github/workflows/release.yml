@@ -1,0 +1,362 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-arm64-ubuntu:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU for arm64
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Build .deb packages (arm64 Ubuntu 24.04)
+        uses: uraimo/run-on-arch-action@v3
+        with:
+          arch: aarch64
+          distro: ubuntu24.04
+          githubToken: ${{ github.token }}
+          dockerRunArgs: --volume "${{ github.workspace }}:/workspace"
+          run: |
+            cd /workspace
+            apt-get update
+            apt-get install -y \
+              build-essential pkg-config devscripts debhelper fakeroot \
+              autoconf automake libtool \
+              libspeex-dev libssl-dev
+            bash autogen.sh
+            ./configure
+            make
+            make check
+            dpkg-buildpackage -us -uc -b
+            mkdir -p /workspace/dist
+            for f in ../*.deb ../*.ddeb; do
+              [ -f "$f" ] || continue
+              base=$(basename "$f" | sed 's/_\(arm64\|amd64\)/_ubuntu2404_\1/')
+              cp "$f" "/workspace/dist/$base"
+            done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs-arm64-ubuntu
+          path: dist/*
+
+  build-arm64-debian12:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU for arm64
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Build .deb packages (arm64 Debian 12)
+        uses: uraimo/run-on-arch-action@v3
+        with:
+          arch: aarch64
+          distro: bookworm
+          githubToken: ${{ github.token }}
+          dockerRunArgs: --volume "${{ github.workspace }}:/workspace"
+          run: |
+            cd /workspace
+            apt-get update
+            apt-get install -y \
+              build-essential pkg-config devscripts debhelper fakeroot \
+              autoconf automake libtool \
+              libspeex-dev libssl-dev
+            bash autogen.sh
+            ./configure
+            make
+            make check
+            dpkg-buildpackage -us -uc -b
+            mkdir -p /workspace/dist
+            for f in ../*.deb ../*.ddeb; do
+              [ -f "$f" ] || continue
+              base=$(basename "$f" | sed 's/_\(arm64\|amd64\)/_debian12_\1/')
+              cp "$f" "/workspace/dist/$base"
+            done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs-arm64-debian12
+          path: dist/*
+
+  build-arm64-debian13:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU for arm64
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Build .deb packages (arm64 Debian 13)
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "${{ github.workspace }}:/workspace" \
+            debian:trixie bash -c '
+              cd /workspace
+              apt-get update
+              apt-get install -y \
+                build-essential pkg-config devscripts debhelper fakeroot \
+                autoconf automake libtool \
+                libspeex-dev libssl-dev
+              bash autogen.sh
+              ./configure
+              make
+              make check
+              dpkg-buildpackage -us -uc -b
+              mkdir -p /workspace/dist
+              for f in ../*.deb ../*.ddeb; do
+                [ -f "$f" ] || continue
+                base=$(basename "$f" | sed "s/_\(arm64\|amd64\)/_debian13_\1/")
+                cp "$f" "/workspace/dist/$base"
+              done
+            '
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs-arm64-debian13
+          path: dist/*
+
+  build-amd64-ubuntu:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config devscripts debhelper fakeroot lintian \
+            autoconf automake libtool \
+            libspeex-dev libssl-dev
+
+      - name: Build and test
+        run: |
+          bash autogen.sh
+          ./configure
+          make
+          make check
+
+      - name: Build .deb packages (amd64 Ubuntu 24.04)
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          for f in ../*.deb ../*.ddeb; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f" | sed 's/_\(arm64\|amd64\)/_ubuntu2404_\1/')
+            cp "$f" "dist/$base"
+          done
+          ls -lh dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs-amd64-ubuntu
+          path: dist/*
+
+  build-amd64-debian12:
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:bookworm
+    steps:
+      - name: Install git
+        run: apt-get update && apt-get install -y git
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            build-essential pkg-config devscripts debhelper fakeroot \
+            autoconf automake libtool \
+            libspeex-dev libssl-dev
+
+      - name: Build and test
+        run: |
+          bash autogen.sh
+          ./configure
+          make
+          make check
+
+      - name: Build .deb packages (amd64 Debian 12)
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          for f in ../*.deb ../*.ddeb; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f" | sed 's/_\(arm64\|amd64\)/_debian12_\1/')
+            cp "$f" "dist/$base"
+          done
+          ls -lh dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs-amd64-debian12
+          path: dist/*
+
+  build-amd64-debian13:
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie
+    steps:
+      - name: Install git
+        run: apt-get update && apt-get install -y git
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            build-essential pkg-config devscripts debhelper fakeroot \
+            autoconf automake libtool \
+            libspeex-dev libssl-dev
+
+      - name: Build and test
+        run: |
+          bash autogen.sh
+          ./configure
+          make
+          make check
+
+      - name: Build .deb packages (amd64 Debian 13)
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          for f in ../*.deb ../*.ddeb; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f" | sed 's/_\(arm64\|amd64\)/_debian13_\1/')
+            cp "$f" "dist/$base"
+          done
+          ls -lh dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs-amd64-debian13
+          path: dist/*
+
+  create-release:
+    needs: [build-arm64-ubuntu, build-arm64-debian12, build-arm64-debian13, build-amd64-ubuntu, build-amd64-debian12, build-amd64-debian13]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release files
+        run: ls -lh dist/
+
+      - name: Generate release notes
+        run: |
+          PREV_TAG=$(git tag --sort=-version:refname | grep '^v' | sed -n '2p')
+          if [ -z "$PREV_TAG" ]; then
+            PREV_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+
+          cat > release_notes.md << HEADER
+          ## libpoc ${GITHUB_REF_NAME}
+
+          PoC (Push-to-Talk over Cellular) protocol library.
+
+          ### Changes
+          HEADER
+
+          git log --pretty=format:"- %s (%h)" "${PREV_TAG}..HEAD" >> release_notes.md
+
+          cat >> release_notes.md << 'FOOTER'
+
+          ### Installation
+
+          ```bash
+          # Runtime library
+          sudo dpkg -i libpoc0_*_<arch>.deb
+
+          # Development headers + pkg-config
+          sudo dpkg -i libpoc-dev_*_<arch>.deb
+
+          sudo ldconfig
+          ```
+
+          ### Build Matrix
+
+          | Architecture | OS |
+          |--------------|----|
+          | amd64 | Ubuntu 24.04 |
+          | amd64 | Debian 12 (Bookworm) |
+          | amd64 | Debian 13 (Trixie) |
+          | arm64 | Ubuntu 24.04 |
+          | arm64 | Debian 12 (Bookworm) |
+          | arm64 | Debian 13 (Trixie) |
+
+          ### Packages
+          FOOTER
+
+          echo "" >> release_notes.md
+          echo "| File | Size |" >> release_notes.md
+          echo "|------|------|" >> release_notes.md
+          for f in dist/*.deb dist/*.ddeb; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+            size=$(du -h "$f" | cut -f1)
+            echo "| \`${name}\` | ${size} |" >> release_notes.md
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: |
+            dist/*.deb
+            dist/*.ddeb
+          draft: false
+          prerelease: false

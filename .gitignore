@@ -1,0 +1,67 @@
+# Build artifacts
+*.o
+*.so
+*.a
+*.la
+*.lo
+*.dSYM/
+.libs/
+.deps/
+
+# Autotools
+aclocal.m4
+autom4te.cache/
+configure
+build-aux/
+libtool
+m4/lt*.m4
+m4/libtool.m4
+config.h
+config.h.in
+config.h.in~
+config.log
+config.status
+stamp-h1
+
+# Makefiles
+Makefile
+Makefile.in
+*/Makefile
+*/Makefile.in
+
+# Generated
+libpoc.pc
+
+# Test binaries & logs
+test_libpoc
+poc_cli
+*.log
+*.trs
+test-suite.log
+
+# Debian
+/debian/.debhelper/
+/debian/tmp/
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper.log
+/debian/debhelper-build-stamp
+/debian/autoreconf.before
+/debian/autoreconf.after
+/debian/libpoc0/
+/debian/libpoc-dev/
+
+# Packages
+*.deb
+*.ddeb
+*.buildinfo
+*.changes
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+._*

@@ -1,0 +1,5 @@
+usr/include/libpoc/*
+usr/lib/*/libpoc.so
+usr/lib/*/libpoc.a
+usr/lib/*/libpoc.la
+usr/lib/*/pkgconfig/libpoc.pc

@@ -1,0 +1,37 @@
+Source: libpoc
+Section: hamradio
+Priority: optional
+Maintainer: Brian <brian@example.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-autoreconf,
+ libspeex-dev,
+ libssl-dev,
+ pkg-config,
+Standards-Version: 4.6.2
+Homepage: https://github.com/briankwest/libpoc
+Rules-Requires-Root: no
+
+Package: libpoc0
+Architecture: any
+Multi-Arch: same
+Section: libs
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: PoC (Push-to-Talk over Cellular) protocol library
+ A C library implementing the signaling and audio transport protocol
+ used by PoC radios for group and private push-to-talk over cellular
+ networks. Supports Speex audio codec, MS-framed TCP signaling, and
+ UDP voice transport.
+
+Package: libpoc-dev
+Architecture: any
+Multi-Arch: same
+Section: libdevel
+Depends: libpoc0 (= ${binary:Version}), ${misc:Depends}
+Description: PoC protocol library (development files)
+ A C library implementing the signaling and audio transport protocol
+ used by PoC radios for group and private push-to-talk over cellular
+ networks.
+ .
+ This package contains the header files and pkg-config file needed
+ to build programs that use libpoc.

@@ -1,0 +1,11 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: libpoc
+Description: PoC (Push-to-Talk over Cellular) protocol library
+Version: @PACKAGE_VERSION@
+Libs: -L${libdir} -lpoc
+Cflags: -I${includedir}
+Requires.private: speex openssl
