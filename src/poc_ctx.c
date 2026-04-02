@@ -101,35 +101,119 @@ static void io_check_timers(poc_ctx_t *ctx)
     }
 }
 
+static void io_start_reconnect(poc_ctx_t *ctx)
+{
+    /* Close dead sockets */
+    poc_tcp_close(ctx);
+    poc_udp_close(ctx);
+
+    /* Reset PTT state */
+    atomic_store(&ctx->ptt_active, false);
+    atomic_store(&ctx->ptt_rx_active, false);
+
+    /* Start exponential backoff: 2s, 4s, 8s, ... 512s, then give up */
+    if (!ctx->reconnect_active) {
+        ctx->reconnect_delay_ms = RECONNECT_INIT_MS;
+        ctx->reconnect_active = true;
+    } else {
+        ctx->reconnect_delay_ms *= 2;
+    }
+
+    if (ctx->reconnect_delay_ms > RECONNECT_MAX_MS) {
+        poc_log("io: reconnect backoff exceeded %ds — giving up", RECONNECT_MAX_MS / 1000);
+        ctx->reconnect_active = false;
+        atomic_store(&ctx->state, POC_STATE_OFFLINE);
+        atomic_store(&ctx->login_state, LOGIN_IDLE);
+        poc_event_t evt = { .type = POC_EVT_STATE_CHANGE,
+                            .state_change = { .state = POC_STATE_OFFLINE }};
+        poc_evt_push(&ctx->evt_queue, &evt);
+        poc_event_t err = { .type = POC_EVT_LOGIN_ERROR,
+                            .login_error = { .code = POC_ERR_NETWORK }};
+        snprintf(err.login_error.msg, sizeof(err.login_error.msg),
+                 "reconnect failed after backoff");
+        poc_evt_push(&ctx->evt_queue, &err);
+        return;
+    }
+
+    ctx->reconnect_at = poc_mono_ms() + ctx->reconnect_delay_ms;
+    poc_log("io: reconnect in %dms (backoff)", ctx->reconnect_delay_ms);
+
+    atomic_store(&ctx->state, POC_STATE_CONNECTING);
+    poc_event_t evt = { .type = POC_EVT_STATE_CHANGE,
+                        .state_change = { .state = POC_STATE_CONNECTING }};
+    poc_evt_push(&ctx->evt_queue, &evt);
+}
+
+static bool io_try_reconnect(poc_ctx_t *ctx)
+{
+    if (!ctx->reconnect_active) return false;
+    if (poc_mono_ms() < ctx->reconnect_at) return false;
+
+    poc_log("io: attempting reconnect to %s:%u", ctx->server_host, ctx->server_port);
+
+    int rc = poc_tcp_connect(ctx);
+    if (rc != POC_OK) {
+        poc_log("io: reconnect TCP failed (%d)", rc);
+        io_start_reconnect(ctx);  /* double the backoff */
+        return false;
+    }
+
+    poc_udp_open(ctx);
+
+    /* Send login */
+    uint8_t buf[256];
+    int len = poc_build_login(ctx, buf, sizeof(buf));
+    if (len > 0)
+        poc_tcp_send_frame(ctx, buf, len);
+
+    atomic_store(&ctx->login_state, LOGIN_SENT_LOGIN);
+    ctx->login_sent_at = poc_mono_ms();
+    ctx->login_retries = 0;
+    ctx->reconnect_active = false;
+
+    poc_log("io: reconnected, login sent");
+    return true;
+}
+
 static void *io_thread_fn(void *arg)
 {
     poc_ctx_t *ctx = (poc_ctx_t *)arg;
     poc_log("io: thread started");
 
     while (atomic_load(&ctx->io_running)) {
+        /* If we're in reconnect backoff, check if it's time to retry */
+        if (ctx->reconnect_active) {
+            io_try_reconnect(ctx);
+            /* Sleep on wakeup pipe only — no TCP/UDP fds yet */
+            struct pollfd wfd = { .fd = ctx->io_wakeup[0], .events = POLLIN };
+            poll(&wfd, 1, 100);
+            if (wfd.revents & POLLIN) {
+                char tmp[64];
+                while (read(ctx->io_wakeup[0], tmp, sizeof(tmp)) > 0);
+            }
+            continue;
+        }
+
         struct pollfd fds[3];
         int nfds = 0;
 
-        /* Wakeup pipe (for shutdown signal and tx_ring nudge) */
         fds[nfds].fd = ctx->io_wakeup[0];
         fds[nfds].events = POLLIN;
         nfds++;
 
-        /* TCP */
         if (ctx->tcp_fd >= 0) {
             fds[nfds].fd = ctx->tcp_fd;
             fds[nfds].events = POLLIN;
             nfds++;
         }
 
-        /* UDP */
         if (ctx->udp_fd >= 0) {
             fds[nfds].fd = ctx->udp_fd;
             fds[nfds].events = POLLIN;
             nfds++;
         }
 
-        int rc = poll(fds, nfds, 20);  /* 20ms max — matches audio frame cadence */
+        int rc = poll(fds, nfds, 20);
         if (rc < 0) {
             if (errno == EINTR) continue;
             break;
@@ -142,42 +226,29 @@ static void *io_thread_fn(void *arg)
         }
 
         /* TCP */
+        bool tcp_dead = false;
         for (int i = 1; i < nfds; i++) {
             if (fds[i].fd == ctx->tcp_fd) {
                 if (fds[i].revents & POLLIN) {
                     rc = poc_tcp_recv(ctx);
-                    if (rc == POC_ERR_NETWORK) {
-                        poc_log("io: TCP connection lost");
-                        poc_event_t evt = { .type = POC_EVT_STATE_CHANGE,
-                                            .state_change = { .state = POC_STATE_OFFLINE }};
-                        poc_evt_push(&ctx->evt_queue, &evt);
-                        atomic_store(&ctx->state, POC_STATE_OFFLINE);
-                        atomic_store(&ctx->login_state, LOGIN_IDLE);
-                    }
+                    if (rc == POC_ERR_NETWORK) tcp_dead = true;
                 }
-                if (fds[i].revents & (POLLERR | POLLHUP)) {
-                    poc_log("io: TCP error/hangup");
-                    poc_event_t evt = { .type = POC_EVT_STATE_CHANGE,
-                                        .state_change = { .state = POC_STATE_OFFLINE }};
-                    poc_evt_push(&ctx->evt_queue, &evt);
-                    atomic_store(&ctx->state, POC_STATE_OFFLINE);
-                    atomic_store(&ctx->login_state, LOGIN_IDLE);
-                }
+                if (fds[i].revents & (POLLERR | POLLHUP))
+                    tcp_dead = true;
             }
 
-            /* UDP */
-            if (fds[i].fd == ctx->udp_fd && (fds[i].revents & POLLIN)) {
+            if (fds[i].fd == ctx->udp_fd && (fds[i].revents & POLLIN))
                 poc_udp_recv(ctx);
-            }
         }
 
-        /* Always drain TX ring — frames may still be queued after PTT stop */
+        if (tcp_dead) {
+            poc_log("io: connection lost, starting reconnect");
+            io_start_reconnect(ctx);
+            continue;
+        }
+
         io_drain_tx(ctx);
-
-        /* Timers */
         io_check_timers(ctx);
-
-        /* GPS reporting */
         poc_gps_tick(ctx);
     }
 

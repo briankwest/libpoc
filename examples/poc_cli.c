@@ -39,12 +39,18 @@ static void on_state(poc_ctx_t *ctx, poc_state_t state, void *ud)
     }
     if (state == POC_STATE_ONLINE)
         printf(">>> Type: ptt, msg <text>, dm <id> <text>, quit\n");
+    if (state == POC_STATE_CONNECTING)
+        printf(">>> Reconnecting...\n");
 }
 
 static void on_login_error(poc_ctx_t *ctx, int code, const char *msg, void *ud)
 {
     (void)ctx; (void)ud;
     printf("\n>>> LOGIN ERROR: %d — %s\n", code, msg);
+    if (code == POC_ERR_NETWORK) {
+        printf(">>> Server unreachable. Giving up.\n");
+        running = 0;
+    }
 }
 
 static void on_ptt_start(poc_ctx_t *ctx, uint32_t speaker, const char *name,

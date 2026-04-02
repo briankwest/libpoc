@@ -81,11 +81,12 @@
 
 /* ── Timeouts ───────────────────────────────────────────────────── */
 
-#define LOGIN_TIMEOUT_MS  7000
-#define VALIDATE_TIMEOUT_MS 5000
-#define HEARTBEAT_DEFAULT_MS 30000
-#define RECONNECT_DELAY_MS 3000
-#define MAX_LOGIN_RETRIES  5
+#define LOGIN_TIMEOUT_MS      7000
+#define VALIDATE_TIMEOUT_MS   5000
+#define HEARTBEAT_DEFAULT_MS  30000
+#define RECONNECT_INIT_MS     2000    /* first retry after 2s */
+#define RECONNECT_MAX_MS      512000  /* give up after 512s */
+#define MAX_LOGIN_RETRIES     5
 
 /* ── Ring buffer sizing ─────────────────────────────────────────── */
 
@@ -247,6 +248,11 @@ struct poc_ctx {
     poc_ring_t      rx_ring;     /* decoded PCM: I/O → caller */
     poc_ring_t      tx_ring;     /* raw PCM:     caller → I/O */
     poc_evt_queue_t evt_queue;   /* signaling:   I/O → caller */
+
+    /* ── Reconnect (I/O thread only) ─────────────────── */
+    uint64_t        reconnect_at;       /* when to try next (mono ms) */
+    int             reconnect_delay_ms; /* current backoff: 2000..512000 */
+    bool            reconnect_active;   /* true = in backoff loop */
 
     /* ── I/O thread ─────────────────────────────────── */
     pthread_t       io_thread;
