@@ -171,9 +171,8 @@ static void *io_thread_fn(void *arg)
             }
         }
 
-        /* Drain TX ring: encode + UDP send */
-        if (atomic_load(&ctx->ptt_active))
-            io_drain_tx(ctx);
+        /* Always drain TX ring — frames may still be queued after PTT stop */
+        io_drain_tx(ctx);
 
         /* Timers */
         io_check_timers(ctx);
@@ -397,8 +396,14 @@ int poc_poll(poc_ctx_t *ctx, int timeout_ms)
                 ctx->cb.on_message(ctx, evt.message.from_id,
                                    evt.message.text, ctx->cb.userdata);
             break;
-        case POC_EVT_FORCE_EXIT:
         case POC_EVT_GROUPS_UPDATED:
+            if (ctx->cb.on_groups_updated)
+                ctx->cb.on_groups_updated(ctx, ctx->groups, ctx->group_count,
+                                          ctx->cb.userdata);
+            break;
+        case POC_EVT_FORCE_EXIT:
+            if (ctx->cb.on_state_change)
+                ctx->cb.on_state_change(ctx, POC_STATE_OFFLINE, ctx->cb.userdata);
             break;
         }
     }

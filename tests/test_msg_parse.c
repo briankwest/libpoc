@@ -220,4 +220,67 @@ void test_msg_parse(void)
         test_assert(ctx->privilege == 0x0FFF, "privilege stored");
         free(ctx);
     }
+
+    /* Message (ext data) handler */
+    {
+        test_begin("parse: ext_data fires message event");
+        poc_ctx_t *ctx = make_ctx();
+        ctx->state = POC_STATE_ONLINE;
+        poc_evt_init(&ctx->evt_queue);
+
+        /* Server→client format: [session][cmd=0x43][sender_id(4)][text] */
+        uint8_t msg[32];
+        msg[0] = 0x01;
+        msg[1] = CMD_NOTIFY_EXT_DATA;
+        poc_write32(msg + 2, 42); /* from user 42 */
+        memcpy(msg + 6, "hello", 6); /* including null */
+
+        poc_parse_message(ctx, msg, 12);
+
+        /* Check event queue has a message event */
+        poc_event_t evt;
+        int found = 0;
+        while (poc_evt_pop(&ctx->evt_queue, &evt)) {
+            if (evt.type == POC_EVT_MESSAGE) {
+                found = 1;
+                test_assert(evt.message.from_id == 42, "from_id should be 42");
+                test_assert(strcmp(evt.message.text, "hello") == 0, "text should match");
+            }
+        }
+        test_assert(found, "should have message event");
+        free(ctx);
+    }
+
+    /* UserData parses groups */
+    {
+        test_begin("parse: user_data parses group list");
+        poc_ctx_t *ctx = make_ctx();
+        ctx->login_state = LOGIN_SENT_VALIDATE;
+        poc_evt_init(&ctx->evt_queue);
+
+        /* Build a minimal user_data: [session][cmd=0x0B][count(2)][gid(4)][nlen(1)][name] */
+        uint8_t msg[64];
+        int off = 0;
+        msg[off++] = 0x01;
+        msg[off++] = CMD_NOTIFY_USER_DATA;
+        poc_write16(msg + off, 2); off += 2; /* 2 groups */
+        /* Group 100 "Dispatch" */
+        poc_write32(msg + off, 100); off += 4;
+        msg[off++] = 8;
+        memcpy(msg + off, "Dispatch", 8); off += 8;
+        /* Group 200 "Field" */
+        poc_write32(msg + off, 200); off += 4;
+        msg[off++] = 5;
+        memcpy(msg + off, "Field", 5); off += 5;
+
+        poc_parse_message(ctx, msg, off);
+
+        test_assert(ctx->state == POC_STATE_ONLINE, "should be ONLINE");
+        test_assert(ctx->group_count == 2, "should have 2 groups");
+        test_assert(ctx->groups[0].id == 100, "group 0 id");
+        test_assert(strcmp(ctx->groups[0].name, "Dispatch") == 0, "group 0 name");
+        test_assert(ctx->groups[1].id == 200, "group 1 id");
+        test_assert(strcmp(ctx->groups[1].name, "Field") == 0, "group 1 name");
+        free(ctx);
+    }
 }

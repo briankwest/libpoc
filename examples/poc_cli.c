@@ -80,6 +80,14 @@ static void on_message(poc_ctx_t *ctx, uint32_t from_id, const char *text, void 
     printf("\n>>> MESSAGE from user %u: %s\n", from_id, text);
 }
 
+static void on_groups(poc_ctx_t *ctx, const poc_group_t *groups, int count, void *ud)
+{
+    (void)ctx; (void)ud;
+    printf("\n>>> GROUPS (%d):\n", count);
+    for (int i = 0; i < count; i++)
+        printf("    [%u] %s\n", groups[i].id, groups[i].name);
+}
+
 static void do_ptt(poc_ctx_t *ctx)
 {
     printf(">>> Starting PTT (1 second 440Hz tone)...\n");
@@ -89,15 +97,21 @@ static void do_ptt(poc_ctx_t *ctx)
         return;
     }
 
+    /* Wait for PTT grant before sending audio */
+    for (int w = 0; w < 50 && running; w++) {
+        poc_poll(ctx, 0);
+        usleep(20000);
+    }
+
     /* Generate and send 1 second of 440Hz tone (50 frames x 20ms) */
-    for (int f = 0; f < 50; f++) {
+    for (int f = 0; f < 50 && running; f++) {
         int16_t pcm[160];
         for (int i = 0; i < 160; i++)
             pcm[i] = (int16_t)(16000.0 * sin(2.0 * M_PI * 440.0 * (f * 160 + i) / 8000.0));
         poc_ptt_send_audio(ctx, pcm, 160);
-        /* Let the I/O thread drain + poll for events */
         poc_poll(ctx, 0);
-        usleep(18000); /* ~20ms cadence */
+        /* Real-time pacing: 20ms per frame — match codec cadence exactly */
+        usleep(20000);
     }
 
     poc_ptt_stop(ctx);
@@ -196,6 +210,7 @@ int main(int argc, char **argv)
         .on_audio_frame = on_audio,
         .on_ptt_granted = on_ptt_granted,
         .on_message = on_message,
+        .on_groups_updated = on_groups,
     };
 
     g_ctx = poc_create(&cfg, &cb);

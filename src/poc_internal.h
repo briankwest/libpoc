@@ -89,8 +89,8 @@
 
 /* ── Ring buffer sizing ─────────────────────────────────────────── */
 
-#define RX_RING_FRAMES    16   /* ~320ms jitter buffer (16 * 20ms) */
-#define TX_RING_FRAMES    16   /* ~320ms TX buffer */
+#define RX_RING_FRAMES    64   /* ~1.28s jitter buffer (64 * 20ms) */
+#define TX_RING_FRAMES    64   /* ~1.28s TX buffer */
 
 /* ── Encryption ─────────────────────────────────────────────────── */
 

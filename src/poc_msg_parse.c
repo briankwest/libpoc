@@ -16,6 +16,7 @@ static void handle_end_ptt(poc_ctx_t *ctx, const uint8_t *data, int len);
 static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len);
 static void handle_force_exit(poc_ctx_t *ctx, const uint8_t *data, int len);
 static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd, const uint8_t *data, int len);
+static void handle_ext_data(poc_ctx_t *ctx, const uint8_t *data, int len);
 
 int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
 {
@@ -80,6 +81,10 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
             ctx->privilege = poc_read32(payload);
             poc_log("parse: privilege updated to 0x%08x", ctx->privilege);
         }
+        break;
+
+    case CMD_NOTIFY_EXT_DATA:
+        handle_ext_data(ctx, payload, plen);
         break;
 
     case CMD_RECV_CONTENT:
@@ -184,11 +189,45 @@ static void handle_user_data(poc_ctx_t *ctx, const uint8_t *data, int len)
     atomic_store(&ctx->state, POC_STATE_ONLINE);
     ctx->login_retries = 0;
 
-    /* TODO: parse group list from data payload */
+    /* Parse group list: [0-1] count (big-endian), then per group:
+     * [4 bytes] group_id, [1 byte] name_len, [N bytes] name */
+    if (len >= 2) {
+        int group_count = poc_read16(data);
+        int off = 2;
+        ctx->group_count = 0;
 
+        for (int i = 0; i < group_count && i < MAX_GROUPS && off < len; i++) {
+            if (off + 5 > len) break;
+            uint32_t gid = poc_read32(data + off); off += 4;
+            int nlen = data[off]; off++;
+            if (off + nlen > len) break;
+
+            poc_group_t *g = &ctx->groups[ctx->group_count];
+            g->id = gid;
+            int copy = nlen < 63 ? nlen : 63;
+            memcpy(g->name, data + off, copy);
+            g->name[copy] = '\0';
+            g->user_count = 0;
+            g->is_active = false;
+            g->is_tmp = false;
+            ctx->group_count++;
+            off += nlen;
+
+            poc_log("user_data: group %u '%s'", gid, g->name);
+        }
+        poc_log("user_data: %d groups parsed", ctx->group_count);
+    }
+
+    /* Fire state change */
     poc_event_t evt = { .type = POC_EVT_STATE_CHANGE,
                         .state_change = { .state = POC_STATE_ONLINE }};
     poc_evt_push(&ctx->evt_queue, &evt);
+
+    /* Fire groups updated */
+    if (ctx->group_count > 0) {
+        poc_event_t gevt = { .type = POC_EVT_GROUPS_UPDATED };
+        poc_evt_push(&ctx->evt_queue, &gevt);
+    }
 }
 
 /*
@@ -262,4 +301,32 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
 {
     poc_log("group_notify: cmd=%02x len=%d", cmd, len);
     /* TODO: parse group add/remove/rename updates and maintain ctx->groups */
+}
+
+/*
+ * Ext data / text message (cmd 0x43):
+ * Server→client format: [0-3] sender_id (big-endian), [4..] text (null-terminated)
+ */
+static void handle_ext_data(poc_ctx_t *ctx, const uint8_t *data, int len)
+{
+    if (len < 5) return;
+
+    uint32_t from_id = poc_read32(data);
+    const char *text = (const char *)(data + 4);
+
+    /* Ensure null-termination within bounds */
+    int text_max = len - 4;
+    bool terminated = false;
+    for (int i = 0; i < text_max; i++) {
+        if (text[i] == '\0') { terminated = true; break; }
+    }
+
+    poc_log("message: from user %u: %.*s", from_id,
+            terminated ? text_max : text_max, text);
+
+    poc_event_t evt = { .type = POC_EVT_MESSAGE };
+    evt.message.from_id = from_id;
+    snprintf(evt.message.text, sizeof(evt.message.text), "%.*s",
+             text_max, text);
+    poc_evt_push(&ctx->evt_queue, &evt);
 }
