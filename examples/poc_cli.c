@@ -94,6 +94,43 @@ static void on_groups(poc_ctx_t *ctx, const poc_group_t *groups, int count, void
         printf("    [%u] %s\n", groups[i].id, groups[i].name);
 }
 
+static void on_user_status(poc_ctx_t *ctx, uint32_t user_id, int status, void *ud)
+{
+    (void)ctx; (void)ud;
+    if (status == -1)
+        printf("\n>>> USER REMOVED: %u\n", user_id);
+    else
+        printf("\n>>> USER %u is now %s\n", user_id, status ? "ONLINE" : "OFFLINE");
+}
+
+static void on_pull(poc_ctx_t *ctx, uint32_t group_id, void *ud)
+{
+    (void)ctx; (void)ud;
+    printf("\n>>> PULLED TO GROUP %u\n", group_id);
+}
+
+static void on_tmp_invite(poc_ctx_t *ctx, uint32_t group_id, uint32_t inviter, void *ud)
+{
+    (void)ctx; (void)ud;
+    printf("\n>>> TEMP GROUP INVITE: group=%u from user=%u\n", group_id, inviter);
+}
+
+static void on_voice_msg(poc_ctx_t *ctx, uint32_t from, uint64_t note_id,
+                         const char *desc, void *ud)
+{
+    (void)ctx; (void)ud;
+    printf("\n>>> VOICE MESSAGE from %u: note=%llu desc=%s\n",
+           from, (unsigned long long)note_id, desc);
+}
+
+static void on_sos_alert(poc_ctx_t *ctx, uint32_t user_id, int type, void *ud)
+{
+    (void)ctx; (void)ud;
+    const char *names[] = {"SOS", "ManDown", "Fall", "CallAlarm"};
+    printf("\n>>> EMERGENCY: user=%u type=%s\n", user_id,
+           type < 4 ? names[type] : "unknown");
+}
+
 static void do_ptt(poc_ctx_t *ctx)
 {
     printf(">>> Starting PTT (1 second 440Hz tone)...\n");
@@ -167,6 +204,12 @@ static void process_stdin(poc_ctx_t *ctx)
         do_dm(ctx, line + 3);
     } else if (strcmp(line, "quit") == 0 || strcmp(line, "q") == 0) {
         running = 0;
+    } else if (strcmp(line, "sos") == 0) {
+        int rc = poc_send_sos(ctx, POC_ALERT_SOS);
+        printf(">>> SOS sent (%d)\n", rc);
+    } else if (strcmp(line, "sos cancel") == 0) {
+        int rc = poc_cancel_sos(ctx);
+        printf(">>> SOS cancel sent (%d)\n", rc);
     } else if (strcmp(line, "state") == 0) {
         const char *names[] = { "OFFLINE", "CONNECTING", "ONLINE", "LOGOUT" };
         printf(">>> State: %s  User ID: %u  Account: %s\n",
@@ -217,6 +260,11 @@ int main(int argc, char **argv)
         .on_ptt_granted = on_ptt_granted,
         .on_message = on_message,
         .on_groups_updated = on_groups,
+        .on_user_status = on_user_status,
+        .on_pull_to_group = on_pull,
+        .on_tmp_group_invite = on_tmp_invite,
+        .on_voice_message = on_voice_msg,
+        .on_sos = on_sos_alert,
     };
 
     g_ctx = poc_create(&cfg, &cb);

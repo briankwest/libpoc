@@ -476,6 +476,38 @@ int poc_poll(poc_ctx_t *ctx, int timeout_ms)
             if (ctx->cb.on_state_change)
                 ctx->cb.on_state_change(ctx, POC_STATE_OFFLINE, ctx->cb.userdata);
             break;
+        case POC_EVT_USER_STATUS:
+            if (ctx->cb.on_user_status)
+                ctx->cb.on_user_status(ctx, evt.user_status.user_id,
+                                       evt.user_status.status, ctx->cb.userdata);
+            break;
+        case POC_EVT_USER_REMOVED:
+            if (ctx->cb.on_user_status)
+                ctx->cb.on_user_status(ctx, evt.user_removed.user_id,
+                                       -1, ctx->cb.userdata);
+            break;
+        case POC_EVT_TMP_GROUP_INVITE:
+            if (ctx->cb.on_tmp_group_invite)
+                ctx->cb.on_tmp_group_invite(ctx, evt.tmp_group_invite.group_id,
+                                            evt.tmp_group_invite.inviter_id,
+                                            ctx->cb.userdata);
+            break;
+        case POC_EVT_PULL_TO_GROUP:
+            if (ctx->cb.on_pull_to_group)
+                ctx->cb.on_pull_to_group(ctx, evt.pull_to_group.group_id,
+                                         ctx->cb.userdata);
+            break;
+        case POC_EVT_VOICE_MESSAGE:
+            if (ctx->cb.on_voice_message)
+                ctx->cb.on_voice_message(ctx, evt.voice_message.from_id,
+                                         evt.voice_message.note_id,
+                                         evt.voice_message.desc, ctx->cb.userdata);
+            break;
+        case POC_EVT_SOS:
+            if (ctx->cb.on_sos)
+                ctx->cb.on_sos(ctx, evt.sos.user_id, evt.sos.alert_type,
+                               ctx->cb.userdata);
+            break;
         }
     }
 
@@ -666,4 +698,113 @@ uint32_t poc_get_user_id(const poc_ctx_t *ctx)
 const char *poc_get_account(const poc_ctx_t *ctx)
 {
     return ctx ? ctx->account : "";
+}
+
+/* ── Phase 2: Temp groups + monitor + dispatch ─────────────────── */
+
+static int send_user_id_list_cmd(poc_ctx_t *ctx, uint8_t cmd,
+                                 const uint32_t *ids, int count)
+{
+    if (!ctx || atomic_load(&ctx->state) != POC_STATE_ONLINE)
+        return POC_ERR_STATE;
+    uint8_t buf[256];
+    int off = 0;
+    buf[off++] = ctx->session_id;
+    poc_write32(buf + off, ctx->user_id); off += 4;
+    buf[off++] = cmd;
+    for (int i = 0; i < count && off + 4 <= (int)sizeof(buf); i++) {
+        poc_write32(buf + off, ids[i]); off += 4;
+    }
+    return poc_tcp_send_frame(ctx, buf, off);
+}
+
+static int send_group_cmd(poc_ctx_t *ctx, uint8_t cmd, uint32_t group_id)
+{
+    if (!ctx || atomic_load(&ctx->state) != POC_STATE_ONLINE)
+        return POC_ERR_STATE;
+    uint8_t buf[16];
+    int off = 0;
+    buf[off++] = ctx->session_id;
+    poc_write32(buf + off, ctx->user_id); off += 4;
+    buf[off++] = cmd;
+    poc_write32(buf + off, group_id); off += 4;
+    return poc_tcp_send_frame(ctx, buf, off);
+}
+
+int poc_invite_tmp_group(poc_ctx_t *ctx, const uint32_t *user_ids, int count)
+{
+    return send_user_id_list_cmd(ctx, CMD_NOTIFY_INVITE_TMP, user_ids, count);
+}
+
+int poc_accept_tmp_group(poc_ctx_t *ctx, uint32_t group_id)
+{
+    return send_group_cmd(ctx, CMD_NOTIFY_ENTER_TMP, group_id);
+}
+
+int poc_reject_tmp_group(poc_ctx_t *ctx, uint32_t group_id)
+{
+    return send_group_cmd(ctx, CMD_NOTIFY_REJECT_TMP, group_id);
+}
+
+int poc_monitor_group(poc_ctx_t *ctx, uint32_t group_id)
+{
+    return send_group_cmd(ctx, CMD_NOTIFY_ENTER_GROUP, group_id);
+}
+
+int poc_unmonitor_group(poc_ctx_t *ctx, uint32_t group_id)
+{
+    return send_group_cmd(ctx, CMD_NOTIFY_LEAVE_TMP, group_id);
+}
+
+int poc_pull_users_to_group(poc_ctx_t *ctx, const uint32_t *user_ids, int count)
+{
+    return send_user_id_list_cmd(ctx, CMD_PULL_TO_GROUP, user_ids, count);
+}
+
+int poc_force_user_exit(poc_ctx_t *ctx, const uint32_t *user_ids, int count)
+{
+    return send_user_id_list_cmd(ctx, CMD_FORCE_EXIT, user_ids, count);
+}
+
+/* ── Phase 3: SOS + voice messages ─────────────────────────────── */
+
+int poc_send_sos(poc_ctx_t *ctx, int alert_type)
+{
+    if (!ctx || atomic_load(&ctx->state) != POC_STATE_ONLINE)
+        return POC_ERR_STATE;
+    uint8_t buf[16];
+    int off = 0;
+    buf[off++] = ctx->session_id;
+    poc_write32(buf + off, ctx->user_id); off += 4;
+    buf[off++] = CMD_NOTIFY_EXT_DATA;  /* SOS uses ext data with special prefix */
+    buf[off++] = 0xFF;  /* SOS marker */
+    buf[off++] = (uint8_t)alert_type;
+    return poc_tcp_send_frame(ctx, buf, off);
+}
+
+int poc_cancel_sos(poc_ctx_t *ctx)
+{
+    if (!ctx || atomic_load(&ctx->state) != POC_STATE_ONLINE)
+        return POC_ERR_STATE;
+    uint8_t buf[16];
+    int off = 0;
+    buf[off++] = ctx->session_id;
+    poc_write32(buf + off, ctx->user_id); off += 4;
+    buf[off++] = CMD_NOTIFY_EXT_DATA;
+    buf[off++] = 0xFE;  /* SOS cancel marker */
+    return poc_tcp_send_frame(ctx, buf, off);
+}
+
+int poc_request_voice_message(poc_ctx_t *ctx, uint64_t note_id)
+{
+    if (!ctx || atomic_load(&ctx->state) != POC_STATE_ONLINE)
+        return POC_ERR_STATE;
+    uint8_t buf[32];
+    int off = 0;
+    buf[off++] = ctx->session_id;
+    poc_write32(buf + off, ctx->user_id); off += 4;
+    buf[off++] = CMD_VOICE_MESSAGE;
+    poc_write32(buf + off, (uint32_t)(note_id >> 32)); off += 4;
+    poc_write32(buf + off, (uint32_t)(note_id & 0xFFFFFFFF)); off += 4;
+    return poc_tcp_send_frame(ctx, buf, off);
 }

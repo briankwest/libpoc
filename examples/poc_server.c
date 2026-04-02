@@ -302,6 +302,9 @@ static int tcp_send_frame(int fd, const uint8_t *payload, uint16_t len)
 }
 
 /* Send frame to all online clients in a group except `exclude_fd` */
+static void broadcast_user_status(server_t *srv, uint32_t user_id,
+                                  int status, int exclude_fd);
+
 static void broadcast_group(server_t *srv, uint32_t group_id,
                             const uint8_t *payload, uint16_t len, int exclude_fd)
 {
@@ -393,6 +396,9 @@ static void handle_validate(server_t *srv, client_t *cl, const uint8_t *data, in
 
     cl->state = CLIENT_ONLINE;
     slog("validate: '%s' authenticated (user_id=%u)", cl->account, cl->user_id);
+
+    /* Broadcast online status to other clients */
+    broadcast_user_status(srv, cl->user_id, 1, cl->fd);
 
     /* Build UserData response (minimal: just enough for poc_cli to go ONLINE)
      * [0]    session_id
@@ -561,6 +567,26 @@ static void handle_ext_data(server_t *srv, client_t *cl, const uint8_t *data, in
     }
 }
 
+/* ── User status broadcast ──────────────────────────────────────── */
+
+static void broadcast_user_status(server_t *srv, uint32_t user_id,
+                                  int status, int exclude_fd)
+{
+    /* Send [session=0][cmd=0x25][user_id(4)][status(1)] to all online clients */
+    uint8_t msg[8];
+    msg[0] = 0;
+    msg[1] = 0x25; /* CMD_NOTIFY_MOD_STATUS */
+    wr32(msg + 2, user_id);
+    msg[6] = (uint8_t)status;
+
+    for (int i = 0; i < srv->client_count; i++) {
+        client_t *c = &srv->clients[i];
+        if (c->state == CLIENT_ONLINE && c->fd != exclude_fd)
+            tcp_send_frame(c->fd, msg, 7);
+    }
+    slog("status: user %u -> %s", user_id, status ? "online" : "offline");
+}
+
 /* ── Message dispatch ───────────────────────────────────────────── */
 
 static void handle_message(server_t *srv, client_t *cl, const uint8_t *data, int len)
@@ -648,6 +674,10 @@ static void disconnect_client(server_t *srv, int idx)
 {
     client_t *cl = &srv->clients[idx];
     slog("disconnect: '%s' (fd=%d)", cl->account, cl->fd);
+
+    /* Broadcast offline status */
+    if (cl->state == CLIENT_ONLINE && cl->user_id)
+        broadcast_user_status(srv, cl->user_id, 0, cl->fd);
 
     /* Release any held floor */
     for (int i = 0; i < srv->group_count; i++) {

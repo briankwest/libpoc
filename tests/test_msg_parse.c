@@ -283,4 +283,160 @@ void test_msg_parse(void)
         test_assert(strcmp(ctx->groups[1].name, "Field") == 0, "group 1 name");
         free(ctx);
     }
+
+    /* ── Phase 1: user status handlers ── */
+
+    {
+        test_begin("parse: mod_status fires user_status event");
+        poc_ctx_t *ctx = make_ctx();
+        poc_evt_init(&ctx->evt_queue);
+        uint8_t msg[8];
+        msg[0] = 0x01; msg[1] = 0x25; /* CMD_NOTIFY_MOD_STATUS */
+        poc_write32(msg + 2, 42);
+        msg[6] = 1; /* online */
+        poc_parse_message(ctx, msg, 7);
+        poc_event_t evt;
+        int found = 0;
+        while (poc_evt_pop(&ctx->evt_queue, &evt))
+            if (evt.type == POC_EVT_USER_STATUS) {
+                found = 1;
+                test_assert(evt.user_status.user_id == 42, "user_id=42");
+                test_assert(evt.user_status.status == 1, "status=online");
+            }
+        test_assert(found, "should have user_status event");
+        free(ctx);
+    }
+
+    {
+        test_begin("parse: remove_user fires user_removed event");
+        poc_ctx_t *ctx = make_ctx();
+        poc_evt_init(&ctx->evt_queue);
+        uint8_t msg[8];
+        msg[0] = 0x01; msg[1] = 0x2B; /* CMD_NOTIFY_REMOVE_USER */
+        poc_write32(msg + 2, 99);
+        poc_parse_message(ctx, msg, 6);
+        poc_event_t evt;
+        int found = 0;
+        while (poc_evt_pop(&ctx->evt_queue, &evt))
+            if (evt.type == POC_EVT_USER_REMOVED) {
+                found = 1;
+                test_assert(evt.user_removed.user_id == 99, "user_id=99");
+            }
+        test_assert(found, "should have user_removed event");
+        free(ctx);
+    }
+
+    {
+        test_begin("parse: mod_name fires groups_updated");
+        poc_ctx_t *ctx = make_ctx();
+        poc_evt_init(&ctx->evt_queue);
+        uint8_t msg[16];
+        msg[0] = 0x01; msg[1] = 0x1F; /* CMD_NOTIFY_MOD_NAME */
+        poc_write32(msg + 2, 42);
+        memcpy(msg + 6, "Alice", 6);
+        poc_parse_message(ctx, msg, 12);
+        poc_event_t evt;
+        int found = 0;
+        while (poc_evt_pop(&ctx->evt_queue, &evt))
+            if (evt.type == POC_EVT_GROUPS_UPDATED) found = 1;
+        test_assert(found, "should fire groups_updated");
+        free(ctx);
+    }
+
+    {
+        test_begin("parse: group add/del updates group list");
+        poc_ctx_t *ctx = make_ctx();
+        poc_evt_init(&ctx->evt_queue);
+        ctx->group_count = 0;
+
+        /* Add group 500 "Test" */
+        uint8_t add[16];
+        add[0] = 0x01; add[1] = 0x33; /* CMD_NOTIFY_ADD_GROUP */
+        poc_write32(add + 2, 500);
+        add[6] = 4;
+        memcpy(add + 7, "Test", 4);
+        poc_parse_message(ctx, add, 11);
+        test_assert(ctx->group_count == 1, "should have 1 group");
+        test_assert(ctx->groups[0].id == 500, "id=500");
+
+        /* Delete group 500 */
+        uint8_t del[8];
+        del[0] = 0x01; del[1] = 0x35; /* CMD_NOTIFY_DEL_GROUP */
+        poc_write32(del + 2, 500);
+        poc_parse_message(ctx, del, 6);
+        test_assert(ctx->group_count == 0, "should have 0 groups");
+        free(ctx);
+    }
+
+    {
+        test_begin("parse: pkg_ack doesn't crash");
+        poc_ctx_t *ctx = make_ctx();
+        uint8_t msg[4];
+        msg[0] = 0x01; msg[1] = 0x1D; /* CMD_NOTIFY_PKG_ACK */
+        int rc = poc_parse_message(ctx, msg, 2);
+        test_assert(rc == POC_OK, "should succeed");
+        free(ctx);
+    }
+
+    /* ── Phase 2: temp group + pull ── */
+
+    {
+        test_begin("parse: tmp_group_invite fires event");
+        poc_ctx_t *ctx = make_ctx();
+        poc_evt_init(&ctx->evt_queue);
+        uint8_t msg[12];
+        msg[0] = 0x01; msg[1] = 0x13; /* CMD_NOTIFY_INVITE_TMP */
+        poc_write32(msg + 2, 999); /* group_id */
+        poc_write32(msg + 6, 42);  /* inviter_id */
+        poc_parse_message(ctx, msg, 10);
+        poc_event_t evt;
+        int found = 0;
+        while (poc_evt_pop(&ctx->evt_queue, &evt))
+            if (evt.type == POC_EVT_TMP_GROUP_INVITE) {
+                found = 1;
+                test_assert(evt.tmp_group_invite.group_id == 999, "gid=999");
+                test_assert(evt.tmp_group_invite.inviter_id == 42, "inviter=42");
+            }
+        test_assert(found, "should have invite event");
+        free(ctx);
+    }
+
+    {
+        test_begin("parse: pull_to_group sets active group");
+        poc_ctx_t *ctx = make_ctx();
+        poc_evt_init(&ctx->evt_queue);
+        ctx->active_group_id = 0;
+        uint8_t msg[8];
+        msg[0] = 0x01; msg[1] = 0x4D; /* CMD_PULL_TO_GROUP */
+        poc_write32(msg + 2, 200);
+        poc_parse_message(ctx, msg, 6);
+        test_assert(ctx->active_group_id == 200, "active_group=200");
+        poc_event_t evt;
+        int found = 0;
+        while (poc_evt_pop(&ctx->evt_queue, &evt))
+            if (evt.type == POC_EVT_PULL_TO_GROUP) found = 1;
+        test_assert(found, "should have pull event");
+        free(ctx);
+    }
+
+    /* ── Phase 3: voice messages ── */
+
+    {
+        test_begin("parse: voice_income fires event");
+        poc_ctx_t *ctx = make_ctx();
+        poc_evt_init(&ctx->evt_queue);
+        uint8_t msg[16];
+        msg[0] = 0x01; msg[1] = 0x72; /* CMD_VOICE_INCOME */
+        poc_write32(msg + 2, 77); /* from_id */
+        poc_parse_message(ctx, msg, 6);
+        poc_event_t evt;
+        int found = 0;
+        while (poc_evt_pop(&ctx->evt_queue, &evt))
+            if (evt.type == POC_EVT_VOICE_MESSAGE) {
+                found = 1;
+                test_assert(evt.voice_message.from_id == 77, "from=77");
+            }
+        test_assert(found, "should have voice_message event");
+        free(ctx);
+    }
 }

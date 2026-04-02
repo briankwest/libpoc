@@ -101,6 +101,12 @@ typedef struct {
     void (*on_audio_frame)(poc_ctx_t *ctx, const poc_audio_frame_t *frame, void *ud);
     void (*on_ptt_granted)(poc_ctx_t *ctx, bool granted, void *ud);
     void (*on_message)(poc_ctx_t *ctx, uint32_t from_id, const char *text, void *ud);
+    void (*on_user_status)(poc_ctx_t *ctx, uint32_t user_id, int status, void *ud);
+    void (*on_tmp_group_invite)(poc_ctx_t *ctx, uint32_t group_id, uint32_t inviter_id, void *ud);
+    void (*on_pull_to_group)(poc_ctx_t *ctx, uint32_t group_id, void *ud);
+    void (*on_voice_message)(poc_ctx_t *ctx, uint32_t from_id, uint64_t note_id,
+                             const char *description, void *ud);
+    void (*on_sos)(poc_ctx_t *ctx, uint32_t user_id, int alert_type, void *ud);
     void *userdata;
 } poc_callbacks_t;
 
@@ -139,6 +145,36 @@ int  poc_send_user_msg(poc_ctx_t *ctx, uint32_t user_id, const char *msg);
 
 int  poc_call_user(poc_ctx_t *ctx, uint32_t user_id);
 int  poc_call_end(poc_ctx_t *ctx);
+
+/* ── Temp groups ───────────────────────────────────────────────── */
+
+int  poc_invite_tmp_group(poc_ctx_t *ctx, const uint32_t *user_ids, int count);
+int  poc_accept_tmp_group(poc_ctx_t *ctx, uint32_t group_id);
+int  poc_reject_tmp_group(poc_ctx_t *ctx, uint32_t group_id);
+
+/* ── Monitor (listen-only) ─────────────────────────────────────── */
+
+int  poc_monitor_group(poc_ctx_t *ctx, uint32_t group_id);
+int  poc_unmonitor_group(poc_ctx_t *ctx, uint32_t group_id);
+
+/* ── Dispatcher control ────────────────────────────────────────── */
+
+int  poc_pull_users_to_group(poc_ctx_t *ctx, const uint32_t *user_ids, int count);
+int  poc_force_user_exit(poc_ctx_t *ctx, const uint32_t *user_ids, int count);
+
+/* ── SOS / Emergency ───────────────────────────────────────────── */
+
+#define POC_ALERT_SOS            0
+#define POC_ALERT_MANDOWN        1
+#define POC_ALERT_FALL           2
+#define POC_ALERT_CALL_ALARM     3
+
+int  poc_send_sos(poc_ctx_t *ctx, int alert_type);
+int  poc_cancel_sos(poc_ctx_t *ctx);
+
+/* ── Voice messages ────────────────────────────────────────────── */
+
+int  poc_request_voice_message(poc_ctx_t *ctx, uint64_t note_id);
 
 /* ── Encryption ─────────────────────────────────────────────────── */
 

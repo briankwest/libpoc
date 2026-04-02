@@ -22,6 +22,15 @@ typedef enum {
     POC_EVT_PTT_GRANTED,
     POC_EVT_MESSAGE,
     POC_EVT_FORCE_EXIT,
+    /* Phase 1: user status + group state */
+    POC_EVT_USER_STATUS,
+    POC_EVT_USER_REMOVED,
+    /* Phase 2: temp groups + dispatch */
+    POC_EVT_TMP_GROUP_INVITE,
+    POC_EVT_PULL_TO_GROUP,
+    /* Phase 3: voice messages + emergency */
+    POC_EVT_VOICE_MESSAGE,
+    POC_EVT_SOS,
 } poc_evt_type_t;
 
 typedef struct {
@@ -33,6 +42,12 @@ typedef struct {
         struct { uint32_t speaker_id; uint32_t group_id; } ptt_end;
         struct { bool granted; } ptt_granted;
         struct { uint32_t from_id; char text[256]; } message;
+        struct { uint32_t user_id; int status; } user_status;
+        struct { uint32_t user_id; } user_removed;
+        struct { uint32_t group_id; uint32_t inviter_id; } tmp_group_invite;
+        struct { uint32_t group_id; } pull_to_group;
+        struct { uint32_t from_id; uint64_t note_id; char desc[128]; } voice_message;
+        struct { uint32_t user_id; int alert_type; } sos;
     };
 } poc_event_t;
 

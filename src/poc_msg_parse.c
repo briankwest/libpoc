@@ -83,13 +83,136 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         }
         break;
 
+    /* ── Phase 1: user status + group state ── */
+
+    case CMD_NOTIFY_MOD_STATUS:
+        if (plen >= 5) {
+            uint32_t uid = poc_read32(payload);
+            int status = payload[4];
+            poc_log("user_status: user=%u status=%d", uid, status);
+            poc_event_t evt = { .type = POC_EVT_USER_STATUS,
+                                .user_status = { .user_id = uid, .status = status }};
+            poc_evt_push(&ctx->evt_queue, &evt);
+        }
+        break;
+
+    case CMD_NOTIFY_MOD_NAME:
+        if (plen >= 5) {
+            uint32_t uid = poc_read32(payload);
+            const char *name = (const char *)(payload + 4);
+            poc_log("mod_name: user=%u name=%.*s", uid, plen - 4, name);
+            /* fire groups_updated so the caller can re-query */
+            poc_event_t evt = { .type = POC_EVT_GROUPS_UPDATED };
+            poc_evt_push(&ctx->evt_queue, &evt);
+        }
+        break;
+
+    case CMD_NOTIFY_MOD_DEF_GRP:
+        if (plen >= 8) {
+            uint32_t uid = poc_read32(payload);
+            uint32_t gid = poc_read32(payload + 4);
+            poc_log("mod_def_group: user=%u group=%u", uid, gid);
+        }
+        break;
+
+    case CMD_NOTIFY_MOD_PRIORITY:
+        if (plen >= 5) {
+            uint32_t uid = poc_read32(payload);
+            int prio = payload[4];
+            poc_log("mod_priority: user=%u priority=%d", uid, prio);
+        }
+        break;
+
+    case CMD_NOTIFY_REMOVE_USER:
+        if (plen >= 4) {
+            uint32_t uid = poc_read32(payload);
+            poc_log("remove_user: user=%u", uid);
+            poc_event_t evt = { .type = POC_EVT_USER_REMOVED,
+                                .user_removed = { .user_id = uid }};
+            poc_evt_push(&ctx->evt_queue, &evt);
+        }
+        break;
+
+    case CMD_NOTIFY_GRP_MOD_MSTR:
+        if (plen >= 8) {
+            uint32_t gid = poc_read32(payload);
+            uint32_t master = poc_read32(payload + 4);
+            poc_log("grp_mod_master: group=%u new_master=%u", gid, master);
+        }
+        break;
+
+    case CMD_NOTIFY_PKG_ACK:
+        poc_log("pkg_ack: len=%d", plen);
+        break;
+
+    /* ── Phase 2: temp groups + dispatch ── */
+
+    case CMD_NOTIFY_INVITE_TMP:
+        if (plen >= 8) {
+            uint32_t gid = poc_read32(payload);
+            uint32_t inviter = poc_read32(payload + 4);
+            poc_log("tmp_group_invite: group=%u inviter=%u", gid, inviter);
+            poc_event_t evt = { .type = POC_EVT_TMP_GROUP_INVITE,
+                                .tmp_group_invite = { .group_id = gid, .inviter_id = inviter }};
+            poc_evt_push(&ctx->evt_queue, &evt);
+        }
+        break;
+
+    case CMD_NOTIFY_ENTER_TMP:
+        if (plen >= 4) {
+            uint32_t gid = poc_read32(payload);
+            poc_log("tmp_group_enter: group=%u", gid);
+            ctx->active_group_id = gid;
+            poc_event_t evt = { .type = POC_EVT_GROUPS_UPDATED };
+            poc_evt_push(&ctx->evt_queue, &evt);
+        }
+        break;
+
+    case CMD_NOTIFY_LEAVE_TMP:
+        poc_log("tmp_group_leave");
+        ctx->active_group_id = 0;
+        break;
+
+    case CMD_NOTIFY_REJECT_TMP:
+        poc_log("tmp_group_rejected");
+        break;
+
+    case CMD_PULL_TO_GROUP:
+        if (plen >= 4) {
+            uint32_t gid = poc_read32(payload);
+            poc_log("pull_to_group: group=%u", gid);
+            ctx->active_group_id = gid;
+            poc_event_t evt = { .type = POC_EVT_PULL_TO_GROUP,
+                                .pull_to_group = { .group_id = gid }};
+            poc_evt_push(&ctx->evt_queue, &evt);
+        }
+        break;
+
+    /* ── Phase 3: voice messages ── */
+
+    case CMD_NOTE_INCOME:
+    case CMD_VOICE_INCOME:
+    case CMD_VOICE_MESSAGE: {
+        if (plen >= 4) {
+            uint32_t from_id = poc_read32(payload);
+            uint64_t note_id = (plen >= 12) ? ((uint64_t)poc_read32(payload + 4) << 32 | poc_read32(payload + 8)) : 0;
+            const char *desc = (plen > 12) ? (const char *)(payload + 12) : "";
+            poc_log("voice_message: from=%u note=%llu cmd=%02x", from_id, (unsigned long long)note_id, cmd);
+            poc_event_t evt = { .type = POC_EVT_VOICE_MESSAGE };
+            evt.voice_message.from_id = from_id;
+            evt.voice_message.note_id = note_id;
+            snprintf(evt.voice_message.desc, sizeof(evt.voice_message.desc), "%s", desc);
+            poc_evt_push(&ctx->evt_queue, &evt);
+        }
+        break;
+    }
+
     case CMD_NOTIFY_EXT_DATA:
         handle_ext_data(ctx, payload, plen);
         break;
 
     case CMD_RECV_CONTENT:
     case CMD_RECV_MCAST:
-        /* Audio content — handled via UDP path, rare on TCP */
         poc_log("parse: content cmd=%02x len=%d (ignored on TCP)", cmd, plen);
         break;
 
@@ -300,7 +423,82 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
                                 const uint8_t *data, int len)
 {
     poc_log("group_notify: cmd=%02x len=%d", cmd, len);
-    /* TODO: parse group add/remove/rename updates and maintain ctx->groups */
+
+    if (len < 4) return;
+    uint32_t gid = poc_read32(data);
+
+    switch (cmd) {
+    case CMD_NOTIFY_ADD_GROUP:
+        /* New group added: [gid(4)][name_len(1)][name(N)] */
+        if (ctx->group_count < MAX_GROUPS && len >= 5) {
+            poc_group_t *g = &ctx->groups[ctx->group_count];
+            g->id = gid;
+            int nlen = data[4];
+            int copy = (nlen < 63 && 5 + nlen <= len) ? nlen : 0;
+            if (copy > 0) memcpy(g->name, data + 5, copy);
+            g->name[copy] = '\0';
+            g->user_count = 0;
+            g->is_active = false;
+            g->is_tmp = false;
+            ctx->group_count++;
+            poc_log("group_notify: added group %u '%s'", gid, g->name);
+        }
+        break;
+
+    case CMD_NOTIFY_DEL_GROUP:
+        /* Group removed: [gid(4)] */
+        for (int i = 0; i < ctx->group_count; i++) {
+            if (ctx->groups[i].id == gid) {
+                ctx->groups[i] = ctx->groups[--ctx->group_count];
+                poc_log("group_notify: removed group %u", gid);
+                break;
+            }
+        }
+        break;
+
+    case CMD_NOTIFY_GRP_MOD_NAME:
+        /* Group renamed: [gid(4)][name_len(1)][name(N)] */
+        for (int i = 0; i < ctx->group_count; i++) {
+            if (ctx->groups[i].id == gid && len >= 5) {
+                int nlen = data[4];
+                int copy = (nlen < 63 && 5 + nlen <= len) ? nlen : 0;
+                if (copy > 0) memcpy(ctx->groups[i].name, data + 5, copy);
+                ctx->groups[i].name[copy] = '\0';
+                poc_log("group_notify: renamed group %u -> '%s'", gid, ctx->groups[i].name);
+                break;
+            }
+        }
+        break;
+
+    case CMD_NOTIFY_ENTER_GROUP:
+    case CMD_NOTIFY_GRP_ADD_USER:
+        /* User joined group: [gid(4)][user_id(4)] */
+        if (len >= 8) {
+            uint32_t uid = poc_read32(data + 4);
+            poc_log("group_notify: user %u joined group %u", uid, gid);
+            for (int i = 0; i < ctx->group_count; i++)
+                if (ctx->groups[i].id == gid) ctx->groups[i].user_count++;
+        }
+        break;
+
+    case CMD_NOTIFY_GRP_DEL_USER:
+        /* User left group: [gid(4)][user_id(4)] */
+        if (len >= 8) {
+            uint32_t uid = poc_read32(data + 4);
+            poc_log("group_notify: user %u left group %u", uid, gid);
+            for (int i = 0; i < ctx->group_count; i++)
+                if (ctx->groups[i].id == gid && ctx->groups[i].user_count > 0)
+                    ctx->groups[i].user_count--;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    /* Always fire groups_updated for any group change */
+    poc_event_t evt = { .type = POC_EVT_GROUPS_UPDATED };
+    poc_evt_push(&ctx->evt_queue, &evt);
 }
 
 /*
