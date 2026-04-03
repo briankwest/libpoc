@@ -71,6 +71,9 @@ static void cli_log(int level, const char *msg, void *ud)
 
 static const char *g_commands[] = {
     "ptt", "msg", "dm", "groups", "join", "leave",
+    "call", "callend", "invite", "accept", "reject",
+    "monitor", "unmonitor", "pull", "kick",
+    "gps", "encrypted", "voicemail",
     "sos", "sos cancel", "state", "quit", "help", NULL
 };
 
@@ -196,6 +199,18 @@ static void cmd_help(void)
     printf("  ptt                  Send 1s tone via PTT\n");
     printf("  msg [gid] <text>     Send group message\n");
     printf("  dm <uid> <text>      Send private message\n");
+    printf("  call <uid>           Start private voice call\n");
+    printf("  callend              End private call\n");
+    printf("  invite <uid> [uid..] Create temp group with users\n");
+    printf("  accept <gid>         Accept temp group invite\n");
+    printf("  reject <gid>         Reject temp group invite\n");
+    printf("  monitor <gid>        Listen-only on a group\n");
+    printf("  unmonitor <gid>      Stop monitoring a group\n");
+    printf("  pull <uid> [uid..]   Force users into current group\n");
+    printf("  kick <uid> [uid..]   Force users offline\n");
+    printf("  gps <lat> <lng>      Set GPS position\n");
+    printf("  encrypted            Show encryption status\n");
+    printf("  voicemail <id>       Request voice message\n");
     printf("  sos                  Send SOS alert\n");
     printf("  sos cancel           Cancel SOS\n");
     printf("  state                Show connection state\n");
@@ -277,15 +292,86 @@ static void process_line(const char *line)
         poc_leave_group(g_ctx);
         g_group_id = 0;
         printf("Left group\n");
-    } else if (strcmp(line, "sos") == 0) {
-        printf("SOS sent (%d)\n", poc_send_sos(g_ctx, POC_ALERT_SOS));
+    /* ── Private calls ── */
+    } else if (strncmp(line, "call ", 5) == 0) {
+        uint32_t uid = atoi(line + 5);
+        if (uid == 0) { printf("Usage: call <user_id>\n"); return; }
+        int rc = poc_call_user(g_ctx, uid);
+        printf("Call to user %u: %s\n", uid, rc == POC_OK ? "started" : "failed");
+    } else if (strcmp(line, "callend") == 0) {
+        printf("Call ended (%d)\n", poc_call_end(g_ctx));
+
+    /* ── Temp groups ── */
+    } else if (strncmp(line, "invite ", 7) == 0) {
+        uint32_t ids[16];
+        int count = 0;
+        char *copy = strdup(line + 7);
+        char *tok = strtok(copy, " ,");
+        while (tok && count < 16) { ids[count++] = atoi(tok); tok = strtok(NULL, " ,"); }
+        free(copy);
+        if (count == 0) { printf("Usage: invite <uid> [uid ...]\n"); return; }
+        printf("Invite sent (%d)\n", poc_invite_tmp_group(g_ctx, ids, count));
+    } else if (strncmp(line, "accept ", 7) == 0) {
+        printf("Accepted (%d)\n", poc_accept_tmp_group(g_ctx, atoi(line + 7)));
+    } else if (strncmp(line, "reject ", 7) == 0) {
+        printf("Rejected (%d)\n", poc_reject_tmp_group(g_ctx, atoi(line + 7)));
+
+    /* ── Monitor ── */
+    } else if (strncmp(line, "monitor ", 8) == 0) {
+        uint32_t gid = atoi(line + 8);
+        printf("Monitor group %u (%d)\n", gid, poc_monitor_group(g_ctx, gid));
+    } else if (strncmp(line, "unmonitor ", 10) == 0) {
+        uint32_t gid = atoi(line + 10);
+        printf("Unmonitor group %u (%d)\n", gid, poc_unmonitor_group(g_ctx, gid));
+
+    /* ── Dispatcher ── */
+    } else if (strncmp(line, "pull ", 5) == 0) {
+        uint32_t ids[16];
+        int count = 0;
+        char *copy = strdup(line + 5);
+        char *tok = strtok(copy, " ,");
+        while (tok && count < 16) { ids[count++] = atoi(tok); tok = strtok(NULL, " ,"); }
+        free(copy);
+        if (count == 0) { printf("Usage: pull <uid> [uid ...]\n"); return; }
+        printf("Pull sent (%d)\n", poc_pull_users_to_group(g_ctx, ids, count));
+    } else if (strncmp(line, "kick ", 5) == 0) {
+        uint32_t ids[16];
+        int count = 0;
+        char *copy = strdup(line + 5);
+        char *tok = strtok(copy, " ,");
+        while (tok && count < 16) { ids[count++] = atoi(tok); tok = strtok(NULL, " ,"); }
+        free(copy);
+        if (count == 0) { printf("Usage: kick <uid> [uid ...]\n"); return; }
+        printf("Force exit sent (%d)\n", poc_force_user_exit(g_ctx, ids, count));
+
+    /* ── GPS ── */
+    } else if (strncmp(line, "gps ", 4) == 0) {
+        float lat = 0, lng = 0;
+        if (sscanf(line + 4, "%f %f", &lat, &lng) < 2)
+            { printf("Usage: gps <lat> <lng>\n"); return; }
+        printf("GPS set (%d)\n", poc_set_gps(g_ctx, lat, lng));
+
+    /* ── Info ── */
+    } else if (strcmp(line, "encrypted") == 0) {
+        printf("Encryption: %s\n", poc_is_encrypted(g_ctx) ? "ACTIVE" : "off");
+
+    } else if (strncmp(line, "voicemail ", 10) == 0) {
+        uint64_t nid = strtoull(line + 10, NULL, 10);
+        printf("Voice message request (%d)\n", poc_request_voice_message(g_ctx, nid));
+
+    /* ── SOS ── */
     } else if (strcmp(line, "sos cancel") == 0) {
         printf("SOS cancel sent (%d)\n", poc_cancel_sos(g_ctx));
+    } else if (strcmp(line, "sos") == 0) {
+        printf("SOS sent (%d)\n", poc_send_sos(g_ctx, POC_ALERT_SOS));
+
+    /* ── State / quit ── */
     } else if (strcmp(line, "state") == 0) {
         const char *names[] = {"OFFLINE", "CONNECTING", "ONLINE", "LOGOUT"};
-        printf("State: %s  User ID: %u  Account: %s  Group: %u\n",
+        printf("State: %s  User ID: %u  Account: %s  Group: %u  Encrypted: %s\n",
                names[poc_get_state(g_ctx)], poc_get_user_id(g_ctx),
-               poc_get_account(g_ctx), g_group_id);
+               poc_get_account(g_ctx), g_group_id,
+               poc_is_encrypted(g_ctx) ? "yes" : "no");
     } else if (strcmp(line, "quit") == 0 || strcmp(line, "q") == 0) {
         running = 0;
     } else {

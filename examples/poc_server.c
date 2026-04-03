@@ -33,28 +33,8 @@
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
 #include "linenoise.h"
+#include "poc_proto.h"
 
-/* ── Protocol constants (must match libpoc) ─────────────────────── */
-
-#define MS_MAGIC_0       0x4D
-#define MS_MAGIC_1       0x53
-#define MS_HDR_LEN       4
-#define CMD_LOGIN        0x01
-#define CMD_VALIDATE     0x04
-#define CMD_HEARTBEAT    0x06
-#define CMD_CHALLENGE    0x07
-#define CMD_USER_DATA    0x0B
-#define CMD_ENTER_GROUP  0x11
-#define CMD_LEAVE_GROUP  0x17
-#define CMD_MOD_PRIV     0x27
-#define CMD_FORCE_EXIT   0x2D
-#define CMD_EXT_DATA     0x43
-#define CMD_START_PTT    0x5D
-#define CMD_END_PTT      0x5E
-#define CMD_START_PTT_ALT 0x66
-#define CMD_END_PTT_ALT  0x67
-
-#define UDP_HDR_LEN      8
 
 /* ── Limits ─────────────────────────────────────────────────────── */
 
@@ -296,16 +276,16 @@ static client_t *find_client_by_user_id(server_t *srv, uint32_t user_id)
 
 static int tcp_send_frame(int fd, const uint8_t *payload, uint16_t len)
 {
-    uint8_t hdr[MS_HDR_LEN];
-    hdr[0] = MS_MAGIC_0;
-    hdr[1] = MS_MAGIC_1;
+    uint8_t hdr[POC_MS_HDR_LEN];
+    hdr[0] = POC_MS_MAGIC_0;
+    hdr[1] = POC_MS_MAGIC_1;
     wr16(hdr + 2, len);
 
-    uint8_t frame[MS_HDR_LEN + 65535];
-    memcpy(frame, hdr, MS_HDR_LEN);
-    memcpy(frame + MS_HDR_LEN, payload, len);
+    uint8_t frame[POC_MS_HDR_LEN + 65535];
+    memcpy(frame, hdr, POC_MS_HDR_LEN);
+    memcpy(frame + POC_MS_HDR_LEN, payload, len);
 
-    int total = MS_HDR_LEN + len;
+    int total = POC_MS_HDR_LEN + len;
     int sent = 0;
     while (sent < total) {
         int n = send(fd, frame + sent, total - sent, MSG_NOSIGNAL);
@@ -318,6 +298,7 @@ static int tcp_send_frame(int fd, const uint8_t *payload, uint16_t len)
 /* Send frame to all online clients in a group except `exclude_fd` */
 static void broadcast_user_status(server_t *srv, uint32_t user_id,
                                   int status, int exclude_fd);
+static void disconnect_client(server_t *srv, int idx);
 
 static void broadcast_group(server_t *srv, uint32_t group_id,
                             const uint8_t *payload, uint16_t len, int exclude_fd)
@@ -348,7 +329,7 @@ static void handle_login(server_t *srv, client_t *cl, const uint8_t *data, int l
     if (!user) {
         slog_err("login: unknown account '%s'", account);
         /* Send login error */
-        uint8_t err[4] = {0, CMD_LOGIN, 0x06};
+        uint8_t err[4] = {0, POC_CMD_LOGIN, 0x06};
         tcp_send_frame(cl->fd, err, 3);
         return;
     }
@@ -361,7 +342,7 @@ static void handle_login(server_t *srv, client_t *cl, const uint8_t *data, int l
 
     /* Build challenge response:
      * [0]    session_id
-     * [1]    CMD_CHALLENGE (0x07)
+     * [1]    POC_NOTIFY_CHALLENGE (0x07)
      * [2-5]  user_id (big-endian)
      * [6-9]  nonce (big-endian)
      * [10]   privilege_ex
@@ -371,7 +352,7 @@ static void handle_login(server_t *srv, client_t *cl, const uint8_t *data, int l
     uint8_t resp[32];
     int off = 0;
     resp[off++] = session;
-    resp[off++] = CMD_CHALLENGE;
+    resp[off++] = POC_NOTIFY_CHALLENGE;
     wr32(resp + off, cl->user_id); off += 4;
     wr32(resp + off, cl->challenge_nonce); off += 4;
     resp[off++] = 0;     /* privilege_ex */
@@ -392,7 +373,7 @@ static void handle_validate(server_t *srv, client_t *cl, const uint8_t *data, in
 
     uint8_t session = data[0];
     /* data[1..4] = user_id */
-    /* data[5] = CMD_VALIDATE (0x04) */
+    /* data[5] = POC_CMD_VALIDATE (0x04) */
     const uint8_t *client_hmac = data + 6; /* 20 bytes */
 
     user_def_t *user = find_user(srv, cl->account);
@@ -407,7 +388,7 @@ static void handle_validate(server_t *srv, client_t *cl, const uint8_t *data, in
     if (memcmp(client_hmac, expected, 20) != 0) {
         slog_err("validate: HMAC mismatch for '%s'", cl->account);
         /* Send validate error */
-        uint8_t err[4] = {session, CMD_LOGIN, 0x01};
+        uint8_t err[4] = {session, POC_CMD_LOGIN, 0x01};
         tcp_send_frame(cl->fd, err, 3);
         return;
     }
@@ -420,13 +401,13 @@ static void handle_validate(server_t *srv, client_t *cl, const uint8_t *data, in
 
     /* Build UserData response (minimal: just enough for poc_cli to go ONLINE)
      * [0]    session_id
-     * [1]    CMD_USER_DATA (0x0B)
+     * [1]    POC_NOTIFY_USER_DATA (0x0B)
      * [2..]  group list data (simplified)
      */
     uint8_t resp[512];
     int off = 0;
     resp[off++] = session;
-    resp[off++] = CMD_USER_DATA;
+    resp[off++] = POC_NOTIFY_USER_DATA;
 
     /* Encode groups this user belongs to */
     int group_count = 0;
@@ -464,7 +445,7 @@ static void handle_heartbeat(server_t *srv, client_t *cl, const uint8_t *data, i
     /* Send heartbeat ack in server→client format: [session][cmd] */
     uint8_t resp[2];
     resp[0] = cl->session_id;
-    resp[1] = CMD_HEARTBEAT;
+    resp[1] = POC_CMD_HEARTBEAT;
     tcp_send_frame(cl->fd, resp, 2);
 }
 
@@ -479,7 +460,7 @@ static void handle_enter_group(server_t *srv, client_t *cl, const uint8_t *data,
     uint8_t notify[32];
     int off = 0;
     notify[off++] = 0;
-    notify[off++] = CMD_ENTER_GROUP;
+    notify[off++] = POC_CMD_ENTER_GROUP;
     wr32(notify + off, cl->user_id); off += 4;
     wr32(notify + off, group_id); off += 4;
     broadcast_group(srv, group_id, notify, off, cl->fd);
@@ -501,7 +482,7 @@ static void handle_start_ptt(server_t *srv, client_t *cl, const uint8_t *data __
         /* Send PTT denied (response with non-zero) */
         uint8_t resp[8];
         resp[0] = cl->session_id;
-        resp[1] = CMD_LOGIN; /* 0x01 = response */
+        resp[1] = POC_CMD_LOGIN; /* 0x01 = response */
         resp[2] = 1; /* denied */
         tcp_send_frame(cl->fd, resp, 3);
         return;
@@ -513,16 +494,16 @@ static void handle_start_ptt(server_t *srv, client_t *cl, const uint8_t *data __
     /* Send grant to requester */
     uint8_t grant[8];
     grant[0] = cl->session_id;
-    grant[1] = CMD_LOGIN; /* 0x01 = response */
+    grant[1] = POC_CMD_LOGIN; /* 0x01 = response */
     grant[2] = 0; /* granted */
     tcp_send_frame(cl->fd, grant, 3);
 
     /* Notify group: PTT start
-     * [0] session, [1] CMD_START_PTT, [2-5] speaker_id, [6] flags */
+     * [0] session, [1] POC_CMD_START_PTT, [2-5] speaker_id, [6] flags */
     uint8_t notify[32];
     int off = 0;
     notify[off++] = 0;
-    notify[off++] = CMD_START_PTT;
+    notify[off++] = POC_CMD_START_PTT;
     wr32(notify + off, cl->user_id); off += 4;
     notify[off++] = 0; /* flags */
     /* Add speaker name */
@@ -547,7 +528,7 @@ static void handle_end_ptt(server_t *srv, client_t *cl, const uint8_t *data __at
     uint8_t notify[16];
     int off = 0;
     notify[off++] = 0;
-    notify[off++] = CMD_END_PTT;
+    notify[off++] = POC_CMD_END_PTT;
     wr32(notify + off, cl->user_id); off += 4;
     broadcast_group(srv, cl->active_group, notify, off, cl->fd);
 }
@@ -569,9 +550,9 @@ static void handle_ext_data(server_t *srv, client_t *cl, const uint8_t *data, in
             uint8_t relay[16];
             int off = 0;
             relay[off++] = 0;
-            relay[off++] = CMD_EXT_DATA;
+            relay[off++] = POC_CMD_EXT_DATA;
             wr32(relay + off, cl->user_id); off += 4;
-            relay[off++] = 0xFF;
+            relay[off++] = POC_SOS_MARKER;
             relay[off++] = (uint8_t)alert_type;
             for (int i = 0; i < srv->client_count; i++)
                 if (srv->clients[i].state == CLIENT_ONLINE && srv->clients[i].fd != cl->fd)
@@ -590,12 +571,12 @@ static void handle_ext_data(server_t *srv, client_t *cl, const uint8_t *data, in
     slog("msg: '%s' -> %u: %s", cl->account, target_id, text);
 
     /* Build server→client format message:
-     * [0] session, [1] CMD_EXT_DATA, [2-5] sender_id, [6..] text */
+     * [0] session, [1] POC_CMD_EXT_DATA, [2-5] sender_id, [6..] text */
     int text_len = strlen(text) + 1;
     uint8_t relay[512];
     int off = 0;
     relay[off++] = 0;
-    relay[off++] = CMD_EXT_DATA;
+    relay[off++] = POC_CMD_EXT_DATA;
     wr32(relay + off, cl->user_id); off += 4;
     if (text_len + off < (int)sizeof(relay)) {
         memcpy(relay + off, text, text_len);
@@ -622,7 +603,7 @@ static void broadcast_user_status(server_t *srv, uint32_t user_id,
     /* Send [session=0][cmd=0x25][user_id(4)][status(1)] to all online clients */
     uint8_t msg[8];
     msg[0] = 0;
-    msg[1] = 0x25; /* CMD_NOTIFY_MOD_STATUS */
+    msg[1] = POC_NOTIFY_MOD_STATUS; /* POC_CMD_MOD_STATUS */
     wr32(msg + 2, user_id);
     msg[6] = (uint8_t)status;
 
@@ -643,33 +624,127 @@ static void handle_message(server_t *srv, client_t *cl, const uint8_t *data, int
     uint8_t cmd = data[5];
 
     switch (cmd) {
-    case CMD_LOGIN:
+    case POC_CMD_LOGIN:
         handle_login(srv, cl, data, len);
         break;
-    case CMD_VALIDATE:
+    case POC_CMD_VALIDATE:
         handle_validate(srv, cl, data, len);
         break;
-    case CMD_HEARTBEAT:
+    case POC_CMD_HEARTBEAT:
         handle_heartbeat(srv, cl, data, len);
         break;
-    case CMD_ENTER_GROUP:
+    case POC_CMD_ENTER_GROUP:
         handle_enter_group(srv, cl, data, len);
         break;
-    case CMD_LEAVE_GROUP:
+    case POC_CMD_LEAVE_GROUP: /* 0x17 — also serves as leave group */
         cl->active_group = 0;
         slog("group: '%s' left group", cl->account);
         break;
-    case CMD_START_PTT:
-    case CMD_START_PTT_ALT:
+    case POC_CMD_START_PTT:
+    case POC_CMD_START_PTT_ALT:
         handle_start_ptt(srv, cl, data, len);
         break;
-    case CMD_END_PTT:
-    case CMD_END_PTT_ALT:
+    case POC_CMD_END_PTT:
+    case POC_CMD_END_PTT_ALT:
         handle_end_ptt(srv, cl, data, len);
         break;
-    case CMD_EXT_DATA:
+    case POC_CMD_EXT_DATA:
         handle_ext_data(srv, cl, data, len);
         break;
+
+    /* ── Temp groups ── */
+    case POC_CMD_INVITE_TMP:
+        if (len >= 10) {
+            slog("tmp_group: '%s' inviting users", cl->account);
+            /* Forward invite to all target users listed in payload */
+            int off = 6;
+            while (off + 4 <= len) {
+                uint32_t uid = rd32(data + off); off += 4;
+                client_t *target = find_client_by_user_id(srv, uid);
+                if (target) {
+                    uint8_t notify[16];
+                    int noff = 0;
+                    notify[noff++] = 0;
+                    notify[noff++] = POC_NOTIFY_INVITE_TMP; /* POC_CMD_INVITE_TMP */
+                    wr32(notify + noff, cl->active_group); noff += 4;
+                    wr32(notify + noff, cl->user_id); noff += 4;
+                    tcp_send_frame(target->fd, notify, noff);
+                    slog("tmp_group: invited user %u", uid);
+                }
+            }
+        }
+        break;
+
+    case POC_CMD_ENTER_TMP:
+        if (len >= 10) {
+            uint32_t gid = rd32(data + 6);
+            cl->active_group = gid;
+            slog("tmp_group: '%s' entered temp group %u", cl->account, gid);
+        }
+        break;
+
+    /* POC_CMD_LEAVE_GROUP == CMD_LEAVE_GROUP (0x17), handled above */
+
+    case POC_CMD_REJECT_TMP:
+        slog("tmp_group: '%s' rejected invite", cl->account);
+        break;
+
+    /* ── Dispatcher: pull to group ── */
+    case POC_CMD_PULL_TO_GROUP:
+        if (len >= 10) {
+            int off = 6;
+            while (off + 4 <= len) {
+                uint32_t uid = rd32(data + off); off += 4;
+                client_t *target = find_client_by_user_id(srv, uid);
+                if (target) {
+                    target->active_group = cl->active_group;
+                    uint8_t notify[8];
+                    int noff = 0;
+                    notify[noff++] = 0;
+                    notify[noff++] = 0x4D; /* POC_CMD_PULL_TO_GROUP */
+                    wr32(notify + noff, cl->active_group); noff += 4;
+                    tcp_send_frame(target->fd, notify, noff);
+                    slog("pull: user %u pulled to group %u by '%s'", uid, cl->active_group, cl->account);
+                }
+            }
+        }
+        break;
+
+    /* ── Dispatcher: force exit ── */
+    case POC_CMD_FORCE_EXIT:
+        if (len >= 10) {
+            int off = 6;
+            while (off + 4 <= len) {
+                uint32_t uid = rd32(data + off); off += 4;
+                for (int i = 0; i < srv->client_count; i++) {
+                    if (srv->clients[i].user_id == uid && srv->clients[i].state == CLIENT_ONLINE) {
+                        slog("force_exit: user %u stunned by '%s'", uid, cl->account);
+                        uint8_t fmsg[4] = {0, POC_NOTIFY_FORCE_EXIT};
+                        tcp_send_frame(srv->clients[i].fd, fmsg, 2);
+                        disconnect_client(srv, i);
+                        break;
+                    }
+                }
+            }
+        }
+        break;
+
+    /* ── User status update ── */
+    case POC_CMD_MOD_STATUS:
+        if (len >= 7) {
+            int status = data[6];
+            slog("status: '%s' set status to %d", cl->account, status);
+            broadcast_user_status(srv, cl->user_id, status, cl->fd);
+        }
+        break;
+
+    /* ── Voice messages (store-and-forward stub) ── */
+    case POC_CMD_NOTE_INCOME:
+    case POC_CMD_VOICE_INCOME:
+    case POC_CMD_VOICE_MESSAGE:
+        slog("voice_msg: from '%s' cmd=0x%02x len=%d (forwarding not implemented)", cl->account, cmd, len);
+        break;
+
     default:
         slog_dbg("unhandled cmd=0x%02x from '%s' len=%d", cmd, cl->account, len);
         break;
@@ -691,18 +766,18 @@ static int tcp_recv_deframe(server_t *srv, client_t *cl)
     uint8_t *buf = cl->recv_buf;
     int remaining = cl->recv_len;
 
-    while (remaining >= MS_HDR_LEN + 1) {
-        if (buf[0] != MS_MAGIC_0 || buf[1] != MS_MAGIC_1) {
+    while (remaining >= POC_MS_HDR_LEN + 1) {
+        if (buf[0] != POC_MS_MAGIC_0 || buf[1] != POC_MS_MAGIC_1) {
             slog_err("bad magic from '%s', resetting", cl->account);
             remaining = 0;
             break;
         }
 
         uint16_t plen = rd16(buf + 2);
-        int frame_total = MS_HDR_LEN + plen;
+        int frame_total = POC_MS_HDR_LEN + plen;
         if (remaining < frame_total) break;
 
-        handle_message(srv, cl, buf + MS_HDR_LEN, plen);
+        handle_message(srv, cl, buf + POC_MS_HDR_LEN, plen);
 
         buf += frame_total;
         remaining -= frame_total;
@@ -737,7 +812,7 @@ static void disconnect_client(server_t *srv, int idx)
         uint8_t notify[16];
         int off = 0;
         notify[off++] = 0;
-        notify[off++] = CMD_END_PTT;
+        notify[off++] = POC_CMD_END_PTT;
         wr32(notify + off, cl->user_id); off += 4;
         broadcast_group(srv, cl->active_group, notify, off, cl->fd);
     }
@@ -766,7 +841,7 @@ static void handle_udp(server_t *srv)
 
     int n = recvfrom(srv->udp_fd, pkt, sizeof(pkt), 0,
                      (struct sockaddr *)&from, &fromlen);
-    if (n < UDP_HDR_LEN) return;
+    if (n < POC_UDP_HDR_LEN) return;
 
     uint32_t sender_id = rd32(pkt + 2);
 
@@ -981,7 +1056,8 @@ int main(int argc, char **argv)
 /* ── Server console commands ────────────────────────────────────── */
 
 static const char *srv_commands[] = {
-    "clients", "groups", "users", "kick", "broadcast", "shutdown", "help", NULL
+    "clients", "groups", "users", "kick", "broadcast", "msg",
+    "pull", "stun", "sos", "status", "shutdown", "help", NULL
 };
 
 static void srv_completion(const char *buf, linenoiseCompletions *lc)
@@ -1051,7 +1127,7 @@ static void srv_cmd_kick(server_t *srv, const char *args)
     if (idx < 0) { printf("Client '%s' not found. Use 'clients' to list.\n", args); return; }
 
     printf("Kicking '%s' (user_id=%u)...\n", srv->clients[idx].account, srv->clients[idx].user_id);
-    uint8_t msg[4] = {0, 0x2D}; /* CMD_FORCE_EXIT */
+    uint8_t msg[4] = {0, POC_NOTIFY_FORCE_EXIT}; /* POC_CMD_FORCE_EXIT */
     tcp_send_frame(srv->clients[idx].fd, msg, 2);
     disconnect_client(srv, idx);
 }
@@ -1066,7 +1142,7 @@ static void srv_cmd_broadcast(server_t *srv, const char *args)
     uint8_t msg[512];
     int off = 0;
     msg[off++] = 0;
-    msg[off++] = 0x43; /* CMD_EXT_DATA */
+    msg[off++] = 0x43; /* POC_CMD_EXT_DATA */
     wr32(msg + off, 0); off += 4; /* from server (user_id=0) */
     int tlen = strlen(args) + 1;
     if (tlen + off < (int)sizeof(msg)) {
@@ -1087,8 +1163,97 @@ static void srv_cmd_help(void)
     printf("  users                List registered users\n");
     printf("  kick <id|account>    Disconnect a client by user_id or name\n");
     printf("  broadcast <msg>      Send message to all clients\n");
+    printf("  msg <uid|gid> <text> Send message to user or group\n");
+    printf("  pull <uid> <gid>     Force user into a group\n");
+    printf("  stun <uid>           Force-exit a user\n");
+    printf("  sos <uid>            Trigger SOS for a user\n");
+    printf("  status               Show server stats\n");
     printf("  shutdown             Stop the server\n");
     printf("  help                 Show this help\n");
+}
+
+static void srv_cmd_msg(server_t *srv, const char *args)
+{
+    uint32_t target = 0;
+    char text[256] = "";
+    if (sscanf(args, "%u %255[^\n]", &target, text) < 2)
+        { printf("Usage: msg <user_id|group_id> <text>\n"); return; }
+
+    uint8_t relay[512];
+    int off = 0;
+    relay[off++] = 0;
+    relay[off++] = POC_NOTIFY_EXT_DATA; /* POC_CMD_EXT_DATA */
+    wr32(relay + off, 0); off += 4; /* from server */
+    int tlen = strlen(text) + 1;
+    memcpy(relay + off, text, tlen); off += tlen;
+
+    int gidx = find_group_idx(srv, target);
+    if (gidx >= 0) {
+        broadcast_group(srv, target, relay, off, -1);
+        printf("Message sent to group %u.\n", target);
+    } else {
+        client_t *t = find_client_by_user_id(srv, target);
+        if (t) { tcp_send_frame(t->fd, relay, off); printf("Message sent to user %u.\n", target); }
+        else printf("Target %u not found.\n", target);
+    }
+}
+
+static void srv_cmd_pull(server_t *srv, const char *args)
+{
+    uint32_t uid = 0, gid = 0;
+    if (sscanf(args, "%u %u", &uid, &gid) < 2)
+        { printf("Usage: pull <user_id> <group_id>\n"); return; }
+    client_t *t = find_client_by_user_id(srv, uid);
+    if (!t) { printf("User %u not online.\n", uid); return; }
+    t->active_group = gid;
+    uint8_t notify[8] = {0, POC_NOTIFY_PULL_TO_GROUP};
+    wr32(notify + 2, gid);
+    tcp_send_frame(t->fd, notify, 6);
+    printf("Pulled user %u to group %u.\n", uid, gid);
+}
+
+static void srv_cmd_stun(server_t *srv, const char *args)
+{
+    uint32_t uid = atoi(args);
+    if (uid == 0) { printf("Usage: stun <user_id>\n"); return; }
+    for (int i = 0; i < srv->client_count; i++) {
+        if (srv->clients[i].user_id == uid && srv->clients[i].state == CLIENT_ONLINE) {
+            uint8_t msg[4] = {0, POC_NOTIFY_FORCE_EXIT};
+            tcp_send_frame(srv->clients[i].fd, msg, 2);
+            printf("Stunned user %u.\n", uid);
+            disconnect_client(srv, i);
+            return;
+        }
+    }
+    printf("User %u not online.\n", uid);
+}
+
+static void srv_cmd_status(server_t *srv)
+{
+    int online = 0;
+    for (int i = 0; i < srv->client_count; i++)
+        if (srv->clients[i].state == CLIENT_ONLINE) online++;
+    printf("Server status:\n");
+    printf("  Registered users: %d\n", srv->user_count);
+    printf("  Groups:           %d\n", srv->group_count);
+    printf("  Connected:        %d (%d online)\n", srv->client_count, online);
+}
+
+static void srv_cmd_sos(server_t *srv, const char *args)
+{
+    uint32_t uid = atoi(args);
+    if (uid == 0) { printf("Usage: sos <user_id>\n"); return; }
+    uint8_t relay[16];
+    int off = 0;
+    relay[off++] = 0;
+    relay[off++] = POC_NOTIFY_EXT_DATA;
+    wr32(relay + off, uid); off += 4;
+    relay[off++] = POC_SOS_MARKER;
+    relay[off++] = 0; /* SOS type */
+    for (int i = 0; i < srv->client_count; i++)
+        if (srv->clients[i].state == CLIENT_ONLINE)
+            tcp_send_frame(srv->clients[i].fd, relay, off);
+    printf("SOS broadcast for user %u.\n", uid);
 }
 
 static void srv_process_line(server_t *srv, const char *line)
@@ -1098,6 +1263,11 @@ static void srv_process_line(server_t *srv, const char *line)
     else if (strcmp(line, "users") == 0) srv_cmd_users(srv);
     else if (strncmp(line, "kick ", 5) == 0) srv_cmd_kick(srv, line + 5);
     else if (strncmp(line, "broadcast ", 10) == 0) srv_cmd_broadcast(srv, line + 10);
+    else if (strncmp(line, "msg ", 4) == 0) srv_cmd_msg(srv, line + 4);
+    else if (strncmp(line, "pull ", 5) == 0) srv_cmd_pull(srv, line + 5);
+    else if (strncmp(line, "stun ", 5) == 0) srv_cmd_stun(srv, line + 5);
+    else if (strncmp(line, "sos ", 4) == 0) srv_cmd_sos(srv, line + 4);
+    else if (strcmp(line, "status") == 0) srv_cmd_status(srv);
     else if (strcmp(line, "shutdown") == 0 || strcmp(line, "quit") == 0) g_running = 0;
     else if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) srv_cmd_help();
     else printf("Unknown command. Type 'help' for a list.\n");
