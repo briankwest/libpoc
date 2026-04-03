@@ -32,6 +32,7 @@
 #include <arpa/inet.h>
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
+#include "linenoise.h"
 
 /* ── Protocol constants (must match libpoc) ─────────────────────── */
 
@@ -765,6 +766,10 @@ static void handle_udp(server_t *srv)
 
 /* ── Main ───────────────────────────────────────────────────────── */
 
+/* Forward declarations for console commands */
+static void srv_completion(const char *buf, linenoiseCompletions *lc);
+static void srv_process_line(server_t *srv, const char *line);
+
 int main(int argc, char **argv)
 {
     const char *config_path = NULL;
@@ -820,10 +825,23 @@ int main(int argc, char **argv)
 
     slog("listening on %s:%d (tcp+udp)", srv.bind_addr, srv.port);
 
+    /* Setup console */
+    linenoiseSetCompletionCallback(srv_completion);
+    linenoiseHistorySetMaxLen(50);
+    int stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK);
+
+    printf("Type 'help' for server commands.\n");
+
     /* Poll loop */
     while (g_running) {
-        struct pollfd fds[2 + MAX_CLIENTS];
+        struct pollfd fds[3 + MAX_CLIENTS];
         int nfds = 0;
+
+        /* stdin for console */
+        fds[nfds].fd = STDIN_FILENO;
+        fds[nfds].events = POLLIN;
+        nfds++;
 
         fds[nfds].fd = srv.listen_fd;
         fds[nfds].events = POLLIN;
@@ -842,8 +860,22 @@ int main(int argc, char **argv)
         int rc = poll(fds, nfds, 100);
         if (rc < 0) { if (errno == EINTR) continue; break; }
 
-        /* Accept new clients */
+        /* Console input */
         if (fds[0].revents & POLLIN) {
+            fcntl(STDIN_FILENO, F_SETFL, stdin_flags); /* blocking for linenoise */
+            char *line = linenoise("srv> ");
+            fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK);
+            if (line) {
+                if (line[0]) {
+                    linenoiseHistoryAdd(line);
+                    srv_process_line(&srv, line);
+                }
+                linenoiseFree(line);
+            }
+        }
+
+        /* Accept new clients */
+        if (fds[1].revents & POLLIN) {
             struct sockaddr_in caddr;
             socklen_t clen = sizeof(caddr);
             int cfd = accept(srv.listen_fd, (struct sockaddr *)&caddr, &clen);
@@ -866,12 +898,12 @@ int main(int argc, char **argv)
         }
 
         /* UDP */
-        if (fds[1].revents & POLLIN)
+        if (fds[2].revents & POLLIN)
             handle_udp(&srv);
 
         /* Client TCP data */
         for (int i = 0; i < srv.client_count; i++) {
-            int pidx = 2 + i;
+            int pidx = 3 + i;
             if (pidx >= nfds) break;
 
             if (fds[pidx].revents & (POLLERR | POLLHUP)) {
@@ -895,4 +927,122 @@ int main(int argc, char **argv)
     close(srv.udp_fd);
 
     return 0;
+}
+
+/* ── Server console commands ────────────────────────────────────── */
+
+static const char *srv_commands[] = {
+    "clients", "groups", "users", "kick", "broadcast", "shutdown", "help", NULL
+};
+
+static void srv_completion(const char *buf, linenoiseCompletions *lc)
+{
+    size_t len = strlen(buf);
+    for (int i = 0; srv_commands[i]; i++)
+        if (strncmp(buf, srv_commands[i], len) == 0)
+            linenoiseAddCompletion(lc, srv_commands[i]);
+}
+
+static void srv_cmd_clients(server_t *srv)
+{
+    printf("Connected clients (%d):\n", srv->client_count);
+    for (int i = 0; i < srv->client_count; i++) {
+        client_t *c = &srv->clients[i];
+        const char *state = c->state == CLIENT_ONLINE ? "online" :
+                           c->state == CLIENT_CHALLENGED ? "auth" : "new";
+        printf("  [%d] fd=%d account='%s' user_id=%u state=%s group=%u\n",
+               i, c->fd, c->account, c->user_id, state, c->active_group);
+    }
+}
+
+static void srv_cmd_groups(server_t *srv)
+{
+    printf("Groups (%d):\n", srv->group_count);
+    for (int i = 0; i < srv->group_count; i++) {
+        group_def_t *g = &srv->groups[i];
+        int online = 0;
+        for (int j = 0; j < srv->client_count; j++)
+            if (srv->clients[j].state == CLIENT_ONLINE &&
+                srv->clients[j].active_group == g->id) online++;
+        const char *floor = "free";
+        if (srv->floor_holder[i] >= 0 && srv->floor_holder[i] < srv->client_count)
+            floor = srv->clients[srv->floor_holder[i]].account;
+        printf("  [%u] %s — %d members, %d online, floor: %s\n",
+               g->id, g->name, g->member_count, online, floor);
+    }
+}
+
+static void srv_cmd_users(server_t *srv)
+{
+    printf("Registered users (%d):\n", srv->user_count);
+    for (int i = 0; i < srv->user_count; i++) {
+        user_def_t *u = &srv->users[i];
+        bool online = false;
+        for (int j = 0; j < srv->client_count; j++)
+            if (srv->clients[j].user_id == u->user_id &&
+                srv->clients[j].state == CLIENT_ONLINE) { online = true; break; }
+        printf("  [%u] %s %s\n", u->user_id, u->account, online ? "(online)" : "");
+    }
+}
+
+static void srv_cmd_kick(server_t *srv, const char *args)
+{
+    int idx = atoi(args);
+    if (idx < 0 || idx >= srv->client_count) {
+        printf("Invalid client index. Use 'clients' to list.\n");
+        return;
+    }
+    printf("Kicking client %d ('%s')...\n", idx, srv->clients[idx].account);
+
+    /* Send force exit notification */
+    uint8_t msg[4] = {0, 0x2D}; /* CMD_FORCE_EXIT */
+    tcp_send_frame(srv->clients[idx].fd, msg, 2);
+    disconnect_client(srv, idx);
+}
+
+static void srv_cmd_broadcast(server_t *srv, const char *args)
+{
+    if (!args || !*args) {
+        printf("Usage: broadcast <message>\n");
+        return;
+    }
+    /* Send message to ALL online clients */
+    uint8_t msg[512];
+    int off = 0;
+    msg[off++] = 0;
+    msg[off++] = 0x43; /* CMD_EXT_DATA */
+    wr32(msg + off, 0); off += 4; /* from server (user_id=0) */
+    int tlen = strlen(args) + 1;
+    if (tlen + off < (int)sizeof(msg)) {
+        memcpy(msg + off, args, tlen);
+        off += tlen;
+    }
+    for (int i = 0; i < srv->client_count; i++)
+        if (srv->clients[i].state == CLIENT_ONLINE)
+            tcp_send_frame(srv->clients[i].fd, msg, off);
+    printf("Broadcast sent to %d clients.\n", srv->client_count);
+}
+
+static void srv_cmd_help(void)
+{
+    printf("Server commands:\n");
+    printf("  clients              List connected clients\n");
+    printf("  groups               List groups with status\n");
+    printf("  users                List registered users\n");
+    printf("  kick <index>         Disconnect a client\n");
+    printf("  broadcast <msg>      Send message to all clients\n");
+    printf("  shutdown             Stop the server\n");
+    printf("  help                 Show this help\n");
+}
+
+static void srv_process_line(server_t *srv, const char *line)
+{
+    if (strcmp(line, "clients") == 0) srv_cmd_clients(srv);
+    else if (strcmp(line, "groups") == 0) srv_cmd_groups(srv);
+    else if (strcmp(line, "users") == 0) srv_cmd_users(srv);
+    else if (strncmp(line, "kick ", 5) == 0) srv_cmd_kick(srv, line + 5);
+    else if (strncmp(line, "broadcast ", 10) == 0) srv_cmd_broadcast(srv, line + 10);
+    else if (strcmp(line, "shutdown") == 0 || strcmp(line, "quit") == 0) g_running = 0;
+    else if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) srv_cmd_help();
+    else printf("Unknown command. Type 'help' for a list.\n");
 }

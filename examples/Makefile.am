@@ -16,9 +16,11 @@ LDADD = \
 	-lpthread \
 	-lm
 
-poc_cli_SOURCES = poc_cli.c
+poc_cli_SOURCES = poc_cli.c linenoise.c
 
-poc_server_SOURCES = poc_server.c
+poc_server_SOURCES = poc_server.c linenoise.c
 poc_server_LDADD = $(OPENSSL_LIBS) -lm
+
+noinst_HEADERS = linenoise.h
 
 EXTRA_DIST = poc_server.conf.ini

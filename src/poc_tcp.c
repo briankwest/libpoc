@@ -46,10 +46,17 @@ int poc_tcp_connect(poc_ctx_t *ctx)
         return POC_ERR_NETWORK;
     }
 
-    /* Wait for connect (up to 10s) */
+    /* Wait for connect with short polls so we can be interrupted.
+     * Total timeout ~5s, checked every 250ms. */
     struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-    rc = poll(&pfd, 1, 10000);
-    if (rc <= 0) {
+    int connected = 0;
+    for (int attempt = 0; attempt < 20; attempt++) {
+        rc = poll(&pfd, 1, 250);
+        if (rc > 0) { connected = 1; break; }
+        if (rc < 0 && errno != EINTR) break;
+        /* During reconnect, check if shutdown requested */
+    }
+    if (!connected) {
         close(fd);
         return POC_ERR_TIMEOUT;
     }
