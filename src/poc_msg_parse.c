@@ -25,12 +25,14 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         return POC_ERR;
     }
 
-    uint8_t session = data[0];
+    (void)data[0]; /* session byte — not used */
     uint8_t cmd = data[1];
     const uint8_t *payload = data + 2;
     int plen = len - 2;
 
-    poc_log_at(POC_LOG_DEBUG, "parse: session=%02x cmd=%02x len=%d", session, cmd, plen);
+    /* Don't spam heartbeat acks every 30s — everything else is interesting */
+    if (cmd != CMD_HEARTBEAT)
+        poc_log_at(POC_LOG_DEBUG, "recv: %s (%d bytes)", poc_notify_name(cmd), plen);
 
     ctx->last_activity = poc_mono_ms();
 
@@ -69,7 +71,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         break;
 
     case CMD_HEARTBEAT:
-        poc_log_at(POC_LOG_DEBUG, "parse: heartbeat ack");
+        /* silent — happens every 30s, not interesting */
         break;
 
     case CMD_NOTIFY_ENTER_GROUP:
@@ -84,7 +86,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
     case CMD_NOTIFY_MOD_PRIV:
         if (plen >= 4) {
             ctx->privilege = poc_read32(payload);
-            poc_log("parse: privilege updated to 0x%08x", ctx->privilege);
+            poc_log_at(POC_LOG_DEBUG, "privilege updated to 0x%08x", ctx->privilege);
         }
         break;
 
@@ -94,7 +96,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 5) {
             uint32_t uid = poc_read32(payload);
             int status = payload[4];
-            poc_log("user_status: user=%u status=%d", uid, status);
+            poc_log("user %u is now %s", uid, status ? "online" : "offline");
             poc_event_t evt = { .type = POC_EVT_USER_STATUS,
                                 .user_status = { .user_id = uid, .status = status }};
             poc_evt_push(&ctx->evt_queue, &evt);
@@ -105,7 +107,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 5) {
             uint32_t uid = poc_read32(payload);
             const char *name = (const char *)(payload + 4);
-            poc_log_at(POC_LOG_DEBUG, "mod_name: user=%u name=%.*s", uid, plen - 4, name);
+            poc_log_at(POC_LOG_DEBUG, "user %u renamed to '%.*s'", uid, plen - 4, name);
             /* fire groups_updated so the caller can re-query */
             poc_event_t evt = { .type = POC_EVT_GROUPS_UPDATED };
             poc_evt_push(&ctx->evt_queue, &evt);
@@ -116,7 +118,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 8) {
             uint32_t uid = poc_read32(payload);
             uint32_t gid = poc_read32(payload + 4);
-            poc_log_at(POC_LOG_DEBUG, "mod_def_group: user=%u group=%u", uid, gid);
+            poc_log_at(POC_LOG_DEBUG, "user %u default group set to %u", uid, gid);
         }
         break;
 
@@ -124,14 +126,14 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 5) {
             uint32_t uid = poc_read32(payload);
             int prio = payload[4];
-            poc_log_at(POC_LOG_DEBUG, "mod_priority: user=%u priority=%d", uid, prio);
+            poc_log_at(POC_LOG_DEBUG, "user %u priority set to %d", uid, prio);
         }
         break;
 
     case CMD_NOTIFY_REMOVE_USER:
         if (plen >= 4) {
             uint32_t uid = poc_read32(payload);
-            poc_log("remove_user: user=%u", uid);
+            poc_log("user %u removed from server", uid);
             poc_event_t evt = { .type = POC_EVT_USER_REMOVED,
                                 .user_removed = { .user_id = uid }};
             poc_evt_push(&ctx->evt_queue, &evt);
@@ -142,12 +144,12 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 8) {
             uint32_t gid = poc_read32(payload);
             uint32_t master = poc_read32(payload + 4);
-            poc_log_at(POC_LOG_DEBUG, "grp_mod_master: group=%u new_master=%u", gid, master);
+            poc_log_at(POC_LOG_DEBUG, "group %u: master changed to user %u", gid, master);
         }
         break;
 
     case CMD_NOTIFY_PKG_ACK:
-        poc_log_at(POC_LOG_DEBUG, "pkg_ack: len=%d", plen);
+        poc_log_at(POC_LOG_DEBUG, "message: delivered");
         break;
 
     /* ── Phase 2: temp groups + dispatch ── */
@@ -156,7 +158,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (plen >= 8) {
             uint32_t gid = poc_read32(payload);
             uint32_t inviter = poc_read32(payload + 4);
-            poc_log_at(POC_LOG_DEBUG, "tmp_group_invite: group=%u inviter=%u", gid, inviter);
+            poc_log("temp group invite: user %u invited you to group %u", inviter, gid);
             poc_event_t evt = { .type = POC_EVT_TMP_GROUP_INVITE,
                                 .tmp_group_invite = { .group_id = gid, .inviter_id = inviter }};
             poc_evt_push(&ctx->evt_queue, &evt);
@@ -166,7 +168,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
     case CMD_NOTIFY_ENTER_TMP:
         if (plen >= 4) {
             uint32_t gid = poc_read32(payload);
-            poc_log_at(POC_LOG_DEBUG, "tmp_group_enter: group=%u", gid);
+            poc_log("joined temp group %u", gid);
             ctx->active_group_id = gid;
             poc_event_t evt = { .type = POC_EVT_GROUPS_UPDATED };
             poc_evt_push(&ctx->evt_queue, &evt);
@@ -174,18 +176,18 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         break;
 
     case CMD_NOTIFY_LEAVE_TMP:
-        poc_log_at(POC_LOG_DEBUG, "tmp_group_leave");
+        poc_log("left temp group");
         ctx->active_group_id = 0;
         break;
 
     case CMD_NOTIFY_REJECT_TMP:
-        poc_log_at(POC_LOG_DEBUG, "tmp_group_rejected");
+        poc_log("temp group invite rejected");
         break;
 
     case CMD_PULL_TO_GROUP:
         if (plen >= 4) {
             uint32_t gid = poc_read32(payload);
-            poc_log("pull_to_group: group=%u", gid);
+            poc_log("pulled into group %u by server", gid);
             ctx->active_group_id = gid;
             poc_event_t evt = { .type = POC_EVT_PULL_TO_GROUP,
                                 .pull_to_group = { .group_id = gid }};
@@ -202,7 +204,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
             uint32_t from_id = poc_read32(payload);
             uint64_t note_id = (plen >= 12) ? ((uint64_t)poc_read32(payload + 4) << 32 | poc_read32(payload + 8)) : 0;
             const char *desc = (plen > 12) ? (const char *)(payload + 12) : "";
-            poc_log("voice_message: from=%u note=%llu cmd=%02x", from_id, (unsigned long long)note_id, cmd);
+            poc_log("voice message from user %u (id=%llu)", from_id, (unsigned long long)note_id);
             poc_event_t evt = { .type = POC_EVT_VOICE_MESSAGE };
             evt.voice_message.from_id = from_id;
             evt.voice_message.note_id = note_id;
@@ -218,20 +220,11 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
 
     case CMD_RECV_CONTENT:
     case CMD_RECV_MCAST:
-        poc_log_at(POC_LOG_DEBUG, "parse: content cmd=%02x len=%d (ignored on TCP)", cmd, plen);
+        poc_log_at(POC_LOG_DEBUG, "recv: %s (%d bytes, TCP — ignored)", poc_notify_name(cmd), plen);
         break;
 
     default:
-        poc_log_at(POC_LOG_DEBUG, "parse: unhandled cmd=%02x len=%d", cmd, plen);
-        /* Hex dump first 32 bytes for debugging */
-        {
-            char hex[97];
-            int dumplen = plen < 32 ? plen : 32;
-            for (int i = 0; i < dumplen; i++)
-                sprintf(hex + i * 3, "%02x ", payload[i]);
-            hex[dumplen * 3] = '\0';
-            poc_log_at(POC_LOG_DEBUG, "  data: %s", hex);
-        }
+        poc_log_at(POC_LOG_DEBUG, "recv: unhandled %s (0x%02x, %d bytes)", poc_notify_name(cmd), cmd, plen);
         break;
     }
 
@@ -251,22 +244,22 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
 static void handle_challenge(poc_ctx_t *ctx, const uint8_t *data, int len)
 {
     if (len < 4) {
-        poc_log("challenge: too short (%d)", len);
+        poc_log_at(POC_LOG_ERROR, "login: challenge too short (%d bytes)", len);
         return;
     }
 
     ctx->user_id = poc_read32(data);
-    poc_log("challenge: user_id=%u", ctx->user_id);
+    poc_log("login: server assigned user_id %u", ctx->user_id);
 
     if (len >= 8) {
         ctx->challenge_nonce = poc_read32(data + 4);
-        poc_log("challenge: nonce=0x%08x", ctx->challenge_nonce);
+        poc_log_at(POC_LOG_DEBUG, "login: received auth challenge");
     }
 
     if (len >= 11) {
         uint16_t key_type = poc_read16(data + 9);
-        poc_log("challenge: key_type=0x%04x priv_ex=0x%02x gps_flag=0x%02x",
-                key_type, data[8], data[11]);
+        poc_log_at(POC_LOG_DEBUG, "login: encryption=%s gps=%s",
+                key_type ? "yes" : "none", data[11] ? "required" : "off");
     }
 
     /* Send validate response */
@@ -277,12 +270,12 @@ static void handle_challenge(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (src == POC_OK) {
             atomic_store(&ctx->login_state, LOGIN_SENT_VALIDATE);
             ctx->login_sent_at = poc_mono_ms();
-            poc_log("challenge: sent validate response (%d bytes)", vlen);
+            poc_log("login: sent auth response");
         } else {
-            poc_log_at(POC_LOG_ERROR, "challenge: validate send failed (%d)", src);
+            poc_log_at(POC_LOG_ERROR, "login: failed to send auth response");
         }
     } else {
-        poc_log_at(POC_LOG_ERROR, "challenge: validate build failed (%d)", vlen);
+        poc_log_at(POC_LOG_ERROR, "login: failed to build auth response");
     }
 }
 
@@ -292,8 +285,6 @@ static void handle_challenge(poc_ctx_t *ctx, const uint8_t *data, int len)
  */
 static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len)
 {
-    poc_log("response: len=%d", len);
-
     /* Login/validate error: server rejected our HMAC or account */
     if (atomic_load(&ctx->login_state) == LOGIN_SENT_VALIDATE) {
         int code = (len >= 1) ? data[0] : -1;
@@ -308,7 +299,7 @@ static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len)
             case 0x0C: reason = "IMEI mismatch"; break;
             default: break;
             }
-            poc_log_at(POC_LOG_ERROR, "login: rejected (code=0x%02x: %s)", code, reason);
+            poc_log_at(POC_LOG_ERROR, "login: rejected — %s", reason);
 
             atomic_store(&ctx->login_state, LOGIN_FAILED);
             atomic_store(&ctx->state, POC_STATE_OFFLINE);
@@ -324,7 +315,7 @@ static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len)
             return;
         }
         /* code == 0: success — UserData (0x0B) will follow shortly */
-        poc_log("response: validate accepted, waiting for user data");
+        poc_log("login: credentials accepted, waiting for group data");
         return;
     }
 
@@ -336,7 +327,7 @@ static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len)
         poc_evt_push(&ctx->evt_queue, &evt);
         if (!granted) {
             atomic_store(&ctx->ptt_active, false);
-            poc_log("response: PTT denied");
+            poc_log("ptt: floor request denied");
         }
         return;
     }
@@ -346,7 +337,7 @@ static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len)
         int code = data[0];
         const char *reason = "unknown";
         if (code == 0x25) reason = "user offline";
-        poc_log_at(POC_LOG_WARNING, "response: delivery failed (0x%02x: %s)", code, reason);
+        poc_log_at(POC_LOG_WARNING, "message: delivery failed — %s", reason);
         poc_event_t evt = { .type = POC_EVT_MESSAGE };
         evt.message.from_id = 0; /* from server */
         snprintf(evt.message.text, sizeof(evt.message.text),
@@ -361,7 +352,7 @@ static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len)
  */
 static void handle_user_data(poc_ctx_t *ctx, const uint8_t *data, int len)
 {
-    poc_log("user_data: received %d bytes — login complete", len);
+    poc_log("login: complete — received group data (%d bytes)", len);
 
     atomic_store(&ctx->login_state, LOGIN_ONLINE);
     atomic_store(&ctx->state, POC_STATE_ONLINE);
@@ -391,9 +382,9 @@ static void handle_user_data(poc_ctx_t *ctx, const uint8_t *data, int len)
             ctx->group_count++;
             off += nlen;
 
-            poc_log("user_data: group %u '%s'", gid, g->name);
+            poc_log("login:   group %u: %s", gid, g->name);
         }
-        poc_log("user_data: %d groups parsed", ctx->group_count);
+        poc_log("login: %d groups available", ctx->group_count);
     }
 
     /* Fire state change */
@@ -431,8 +422,8 @@ static void handle_start_ptt(poc_ctx_t *ctx, const uint8_t *data, int len)
     snprintf(ctx->ptt_speaker_name, sizeof(ctx->ptt_speaker_name),
              anonymous ? "Anonymous" : "User %u", speaker_id);
 
-    poc_log("ptt_start: speaker=%u %s", speaker_id,
-            anonymous ? "(anon)" : "");
+    poc_log("ptt: user %u started talking%s on group %u", speaker_id,
+            anonymous ? " (anonymous)" : "", ctx->active_group_id);
 
     poc_event_t evt = { .type = POC_EVT_PTT_START,
                         .ptt_start = { .speaker_id = speaker_id,
@@ -453,7 +444,7 @@ static void handle_end_ptt(poc_ctx_t *ctx, const uint8_t *data, int len)
     uint32_t speaker_id = poc_read32(data);
     atomic_store(&ctx->ptt_rx_active, false);
 
-    poc_log("ptt_end: speaker=%u", speaker_id);
+    poc_log("ptt: user %u stopped talking", speaker_id);
 
     poc_event_t evt = { .type = POC_EVT_PTT_END,
                         .ptt_end = { .speaker_id = speaker_id,
@@ -463,7 +454,7 @@ static void handle_end_ptt(poc_ctx_t *ctx, const uint8_t *data, int len)
 
 static void handle_force_exit(poc_ctx_t *ctx, const uint8_t *data __attribute__((unused)), int len __attribute__((unused)))
 {
-    poc_log("force_exit: stunned by server");
+    poc_log_at(POC_LOG_WARNING, "*** STUNNED by server — forced offline ***");
     atomic_store(&ctx->state, POC_STATE_OFFLINE);
     atomic_store(&ctx->login_state, LOGIN_IDLE);
 
@@ -477,7 +468,7 @@ static void handle_force_exit(poc_ctx_t *ctx, const uint8_t *data __attribute__(
 static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
                                 const uint8_t *data, int len)
 {
-    poc_log_at(POC_LOG_DEBUG, "group_notify: cmd=%02x len=%d", cmd, len);
+    poc_log_at(POC_LOG_DEBUG, "group: %s notification", poc_notify_name(cmd));
 
     if (len < 4) return;
     uint32_t gid = poc_read32(data);
@@ -496,7 +487,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
             g->is_active = false;
             g->is_tmp = false;
             ctx->group_count++;
-            poc_log_at(POC_LOG_DEBUG, "group_notify: added group %u '%s'", gid, g->name);
+            poc_log("group: added group %u '%s'", gid, g->name);
         }
         break;
 
@@ -505,7 +496,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
         for (int i = 0; i < ctx->group_count; i++) {
             if (ctx->groups[i].id == gid) {
                 ctx->groups[i] = ctx->groups[--ctx->group_count];
-                poc_log_at(POC_LOG_DEBUG, "group_notify: removed group %u", gid);
+                poc_log("group: removed group %u", gid);
                 break;
             }
         }
@@ -519,7 +510,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
                 int copy = (nlen < 63 && 5 + nlen <= len) ? nlen : 0;
                 if (copy > 0) memcpy(ctx->groups[i].name, data + 5, copy);
                 ctx->groups[i].name[copy] = '\0';
-                poc_log_at(POC_LOG_DEBUG, "group_notify: renamed group %u -> '%s'", gid, ctx->groups[i].name);
+                poc_log("group: renamed group %u to '%s'", gid, ctx->groups[i].name);
                 break;
             }
         }
@@ -530,7 +521,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
         /* User joined group: [gid(4)][user_id(4)] */
         if (len >= 8) {
             uint32_t uid = poc_read32(data + 4);
-            poc_log_at(POC_LOG_DEBUG, "group_notify: user %u joined group %u", uid, gid);
+            poc_log_at(POC_LOG_DEBUG, "group: user %u joined group %u", uid, gid);
             for (int i = 0; i < ctx->group_count; i++)
                 if (ctx->groups[i].id == gid) ctx->groups[i].user_count++;
         }
@@ -540,7 +531,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
         /* User left group: [gid(4)][user_id(4)] */
         if (len >= 8) {
             uint32_t uid = poc_read32(data + 4);
-            poc_log_at(POC_LOG_DEBUG, "group_notify: user %u left group %u", uid, gid);
+            poc_log_at(POC_LOG_DEBUG, "group: user %u left group %u", uid, gid);
             for (int i = 0; i < ctx->group_count; i++)
                 if (ctx->groups[i].id == gid && ctx->groups[i].user_count > 0)
                     ctx->groups[i].user_count--;
@@ -570,12 +561,14 @@ static void handle_ext_data(poc_ctx_t *ctx, const uint8_t *data, int len)
     if (len >= 5 && ((uint8_t)data[4] == 0xFF || (uint8_t)data[4] == 0xFE)) {
         if ((uint8_t)data[4] == 0xFF) {
             int alert_type = (len >= 6) ? data[5] : 0;
-            poc_log("SOS: from user %u, type=%d", from_id, alert_type);
+            const char *alert_names[] = {"SOS", "ManDown", "Fall", "CallAlarm"};
+            poc_log_at(POC_LOG_WARNING, "*** %s ALERT from user %u ***",
+                       alert_type < 4 ? alert_names[alert_type] : "UNKNOWN", from_id);
             poc_event_t evt = { .type = POC_EVT_SOS,
                                 .sos = { .user_id = from_id, .alert_type = alert_type }};
             poc_evt_push(&ctx->evt_queue, &evt);
         } else {
-            poc_log("SOS cancel: from user %u", from_id);
+            poc_log("SOS cancelled by user %u", from_id);
         }
         return;
     }
@@ -588,8 +581,7 @@ static void handle_ext_data(poc_ctx_t *ctx, const uint8_t *data, int len)
         if (text[i] == '\0') { terminated = true; break; }
     }
 
-    poc_log("message: from user %u: %.*s", from_id,
-            terminated ? text_max : text_max, text);
+    poc_log("message from user %u: %.*s", from_id, text_max, text);
 
     poc_event_t evt = { .type = POC_EVT_MESSAGE };
     evt.message.from_id = from_id;

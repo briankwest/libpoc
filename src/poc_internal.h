@@ -308,6 +308,10 @@ int         poc_build_leave_group(poc_ctx_t *ctx, uint8_t *buf, int buflen);
 int         poc_build_start_ptt(poc_ctx_t *ctx, uint8_t *buf, int buflen);
 int         poc_build_end_ptt(poc_ctx_t *ctx, uint8_t *buf, int buflen);
 
+/* poc_util.c — human-readable protocol names */
+const char *poc_cmd_name(uint8_t cmd);     /* client→server command name */
+const char *poc_notify_name(uint8_t cmd);  /* server→client notification name */
+
 /* poc_msg_parse.c */
 int         poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len);
 

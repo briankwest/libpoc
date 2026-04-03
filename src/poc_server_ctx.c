@@ -93,12 +93,22 @@ static void srv_status_broadcast(poc_server_t *srv, uint32_t user_id, int status
     srv_broadcast_all(srv, msg, 7, exclude_fd);
 }
 
+static const char *srv_state_name(srv_client_state_t s)
+{
+    switch (s) {
+    case SRV_CLIENT_NEW:        return "new";
+    case SRV_CLIENT_CHALLENGED: return "authenticating";
+    case SRV_CLIENT_ONLINE:     return "online";
+    default:                    return "unknown";
+    }
+}
+
 /* ── Client disconnect ──────────────────────────────────────────── */
 
 static void srv_disconnect(poc_server_t *srv, int idx)
 {
     srv_client_t *cl = &srv->clients[idx];
-    poc_log_at(POC_LOG_INFO, "srv: disconnect '%s' (user_id=%u)", cl->account, cl->user_id);
+    poc_log_at(POC_LOG_INFO, "srv: %s (user %u) disconnected", cl->account, cl->user_id);
 
     if (cl->state == SRV_CLIENT_ONLINE) {
         srv_status_broadcast(srv, cl->user_id, 0, cl->fd);
@@ -136,7 +146,7 @@ static void srv_handle_login(poc_server_t *srv, srv_client_t *cl, const uint8_t 
     snprintf(cl->account, sizeof(cl->account), "%s", account);
     srv_user_t *user = srv_find_user(srv, account);
     if (!user) {
-        poc_log_at(POC_LOG_WARNING, "srv: unknown account '%s'", account);
+        poc_log_at(POC_LOG_WARNING, "srv: login rejected — unknown account '%s'", account);
         uint8_t err[4] = { cl->session_id, POC_NOTIFY_RESPONSE, 0x06 };
         srv_send_frame(cl->fd, err, 3);
         return;
@@ -159,13 +169,14 @@ static void srv_handle_login(poc_server_t *srv, srv_client_t *cl, const uint8_t 
     resp[off++] = 0; /* gps_flag */
 
     srv_send_frame(cl->fd, resp, off);
-    poc_log_at(POC_LOG_INFO, "srv: challenged '%s' (user_id=%u)", account, cl->user_id);
+    poc_log_at(POC_LOG_INFO, "srv: %s: sent auth challenge (user %u)", account, cl->user_id);
 }
 
 static void srv_handle_validate(poc_server_t *srv, srv_client_t *cl, const uint8_t *data, int len)
 {
     if (len < 26 || cl->state != SRV_CLIENT_CHALLENGED) {
-        poc_log_at(POC_LOG_WARNING, "srv: validate rejected: len=%d state=%d (need len>=26 state=CHALLENGED)", len, cl->state);
+        poc_log_at(POC_LOG_WARNING, "srv: %s: auth response rejected (expected %s, got %s)",
+                   cl->account, srv_state_name(SRV_CLIENT_CHALLENGED), srv_state_name(cl->state));
         return;
     }
     uint8_t session = data[0];
@@ -178,7 +189,7 @@ static void srv_handle_validate(poc_server_t *srv, srv_client_t *cl, const uint8
     HMAC(EVP_sha1(), (const uint8_t *)cl->password_sha1, 40, nonce_buf, 4, expected, &hlen);
 
     if (memcmp(client_hmac, expected, 20) != 0) {
-        poc_log_at(POC_LOG_WARNING, "srv: HMAC mismatch for '%s'", cl->account);
+        poc_log_at(POC_LOG_WARNING, "srv: %s: authentication failed (bad password)", cl->account);
         uint8_t err[4] = { session, POC_NOTIFY_RESPONSE, 0x01 };
         srv_send_frame(cl->fd, err, 3);
         return;
@@ -186,7 +197,7 @@ static void srv_handle_validate(poc_server_t *srv, srv_client_t *cl, const uint8
 
     cl->state = SRV_CLIENT_ONLINE;
     cl->last_heartbeat = poc_mono_ms();
-    poc_log_at(POC_LOG_INFO, "srv: '%s' authenticated (user_id=%u)", cl->account, cl->user_id);
+    poc_log_at(POC_LOG_INFO, "srv: %s authenticated — now online (user %u)", cl->account, cl->user_id);
 
     /* Broadcast online status */
     srv_status_broadcast(srv, cl->user_id, 1, cl->fd);
@@ -238,7 +249,7 @@ static void srv_handle_enter_group(poc_server_t *srv, srv_client_t *cl, const ui
     if (len < 10) return;
     uint32_t gid = poc_read32(data + 6);
     cl->active_group = gid;
-    poc_log_at(POC_LOG_INFO, "srv: '%s' entered group %u", cl->account, gid);
+    poc_log_at(POC_LOG_INFO, "srv: %s joined group %u", cl->account, gid);
 
     uint8_t notify[12];
     int off = 0;
@@ -272,7 +283,7 @@ static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx
 
     if (grant) {
         srv->groups[gidx].floor_holder = cl_idx;
-        poc_log_at(POC_LOG_INFO, "srv: '%s' granted PTT on group %u", cl->account, cl->active_group);
+        poc_log_at(POC_LOG_INFO, "srv: %s granted PTT on group %u", cl->account, cl->active_group);
 
         uint8_t notify[64];
         int off = 0;
@@ -283,7 +294,7 @@ static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx
         memcpy(notify + off, cl->account, nlen); off += nlen;
         srv_broadcast_group(srv, cl->active_group, notify, off, cl->fd);
     } else {
-        poc_log_at(POC_LOG_DEBUG, "srv: PTT denied for '%s' on group %u", cl->account, cl->active_group);
+        poc_log_at(POC_LOG_DEBUG, "srv: %s PTT denied on group %u (floor busy)", cl->account, cl->active_group);
     }
 }
 
@@ -293,7 +304,7 @@ static void srv_handle_end_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx)
     int gidx = srv_find_group_idx(srv, cl->active_group);
     if (gidx >= 0 && srv->groups[gidx].floor_holder == cl_idx) {
         srv->groups[gidx].floor_holder = -1;
-        poc_log_at(POC_LOG_INFO, "srv: '%s' released PTT on group %u", cl->account, cl->active_group);
+        poc_log_at(POC_LOG_INFO, "srv: %s released PTT on group %u", cl->account, cl->active_group);
     }
 
     uint8_t notify[8];
@@ -315,7 +326,7 @@ static void srv_handle_ext_data(poc_server_t *srv, srv_client_t *cl, const uint8
     if (marker == POC_SOS_MARKER || marker == POC_SOS_CANCEL_MARKER) {
         int alert_type = (len > 7) ? data[7] : 0;
         if (marker == POC_SOS_MARKER) {
-            poc_log_at(POC_LOG_WARNING, "srv: *** SOS from '%s' ***", cl->account);
+            poc_log_at(POC_LOG_WARNING, "srv: *** SOS ALERT from %s (user %u) ***", cl->account, cl->user_id);
             uint8_t relay[10];
             int off = 0;
             relay[off++] = 0; relay[off++] = POC_NOTIFY_EXT_DATA;
@@ -335,7 +346,7 @@ static void srv_handle_ext_data(poc_server_t *srv, srv_client_t *cl, const uint8
     const char *text = (const char *)(data + 10);
     int text_len = len - 10;
 
-    poc_log_at(POC_LOG_INFO, "srv: msg '%s' -> %u: %.*s", cl->account, target_id, text_len, text);
+    poc_log_at(POC_LOG_INFO, "srv: %s -> %u: %.*s", cl->account, target_id, text_len, text);
 
     uint8_t relay[512];
     int off = 0;
@@ -356,7 +367,7 @@ static void srv_handle_ext_data(poc_server_t *srv, srv_client_t *cl, const uint8
             srv_send_frame(cl->fd, ack, 3);
         } else {
             /* Target not online — notify sender */
-            poc_log_at(POC_LOG_INFO, "srv: user %u not online, notifying sender", target_id);
+            poc_log_at(POC_LOG_INFO, "srv: user %u offline — notifying %s", target_id, cl->account);
             uint8_t nack[4] = { cl->session_id, POC_NOTIFY_RESPONSE, 0x25 }; /* 0x25 = target unavailable */
             srv_send_frame(cl->fd, nack, 3);
         }
@@ -373,7 +384,7 @@ static void srv_handle_force_exit(poc_server_t *srv, srv_client_t *cl, const uin
         uint32_t uid = poc_read32(data + off); off += 4;
         for (int i = 0; i < srv->client_count; i++) {
             if (srv->clients[i].user_id == uid && srv->clients[i].state == SRV_CLIENT_ONLINE) {
-                poc_log_at(POC_LOG_WARNING, "srv: user %u stunned by '%s'", uid, cl->account);
+                poc_log_at(POC_LOG_WARNING, "srv: %s stunned user %u — forced offline", cl->account, uid);
                 uint8_t msg[4] = { 0, POC_NOTIFY_FORCE_EXIT };
                 srv_send_frame(srv->clients[i].fd, msg, 2);
                 srv_disconnect(srv, i);
@@ -396,7 +407,7 @@ static void srv_handle_pull(poc_server_t *srv, srv_client_t *cl, const uint8_t *
             notify[noff++] = 0; notify[noff++] = POC_NOTIFY_PULL_TO_GROUP;
             poc_write32(notify + noff, cl->active_group); noff += 4;
             srv_send_frame(t->fd, notify, noff);
-            poc_log_at(POC_LOG_INFO, "srv: pulled user %u to group %u", uid, cl->active_group);
+            poc_log_at(POC_LOG_INFO, "srv: %s pulled user %u into group %u", cl->account, uid, cl->active_group);
         }
     }
 }
@@ -408,8 +419,12 @@ static void srv_dispatch(poc_server_t *srv, int cl_idx, const uint8_t *data, int
     if (len < 6) return;
     srv_client_t *cl = &srv->clients[cl_idx];
     uint8_t cmd = data[5]; /* client→server format: cmd at offset 5 */
-    poc_log_at(POC_LOG_DEBUG, "srv: dispatch cmd=0x%02x len=%d from '%s' state=%d",
-               cmd, len, cl->account, cl->state);
+
+    /* Don't spam heartbeat every 30s — everything else is interesting */
+    if (cmd != POC_CMD_HEARTBEAT)
+        poc_log_at(POC_LOG_DEBUG, "srv: %s: %s (%s)",
+                   cl->account[0] ? cl->account : "?",
+                   poc_cmd_name(cmd), srv_state_name(cl->state));
 
     switch (cmd) {
     case POC_CMD_LOGIN:       srv_handle_login(srv, cl, data, len); break;
@@ -437,7 +452,7 @@ static void srv_dispatch(poc_server_t *srv, int cl_idx, const uint8_t *data, int
     /* Temp groups */
     case POC_CMD_INVITE_TMP:
         if (len >= 10) {
-            poc_log_at(POC_LOG_INFO, "srv: '%s' inviting users to temp group", cl->account);
+            poc_log_at(POC_LOG_INFO, "srv: %s inviting users to temp group", cl->account);
             int off = 6;
             while (off + 4 <= len) {
                 uint32_t uid = poc_read32(data + off); off += 4;
@@ -457,22 +472,22 @@ static void srv_dispatch(poc_server_t *srv, int cl_idx, const uint8_t *data, int
         if (len >= 10) {
             uint32_t gid = poc_read32(data + 6);
             cl->active_group = gid;
-            poc_log_at(POC_LOG_INFO, "srv: '%s' entered temp group %u", cl->account, gid);
+            poc_log_at(POC_LOG_INFO, "srv: %s joined temp group %u", cl->account, gid);
         }
         break;
     case POC_CMD_REJECT_TMP:
-        poc_log_at(POC_LOG_INFO, "srv: '%s' rejected temp group invite", cl->account);
+        poc_log_at(POC_LOG_INFO, "srv: %s rejected temp group invite", cl->account);
         break;
 
     /* Voice messages */
     case POC_CMD_NOTE_INCOME:
     case POC_CMD_VOICE_INCOME:
     case POC_CMD_VOICE_MESSAGE:
-        poc_log_at(POC_LOG_INFO, "srv: voice msg from '%s' cmd=0x%02x len=%d", cl->account, cmd, len);
+        poc_log_at(POC_LOG_INFO, "srv: %s sent %s (%d bytes)", cl->account, poc_cmd_name(cmd), len);
         break;
 
     default:
-        poc_log_at(POC_LOG_DEBUG, "srv: unhandled cmd=0x%02x from '%s'", cmd, cl->account);
+        poc_log_at(POC_LOG_DEBUG, "srv: %s: unhandled command %s (0x%02x)", cl->account, poc_cmd_name(cmd), cmd);
         break;
     }
 }
@@ -577,7 +592,8 @@ static void *srv_io_thread(void *arg)
                 memset(c, 0, sizeof(*c));
                 c->fd = cfd;
                 c->state = SRV_CLIENT_NEW;
-                poc_log_at(POC_LOG_INFO, "srv: accept fd=%d", cfd);
+                poc_log_at(POC_LOG_INFO, "srv: new client connected from %s",
+                           inet_ntoa(ca.sin_addr));
             } else if (cfd >= 0) {
                 close(cfd);
             }

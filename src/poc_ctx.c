@@ -65,7 +65,8 @@ static void io_check_timers(poc_ctx_t *ctx)
     /* Login timeout */
     login_state_t ls = atomic_load(&ctx->login_state);
     if (ls == LOGIN_SENT_LOGIN && now - ctx->login_sent_at > LOGIN_TIMEOUT_MS) {
-        poc_log("io: login timeout");
+        poc_log_at(POC_LOG_WARNING, "login: timed out, retrying (%d/%d)...",
+                   ctx->login_retries + 1, MAX_LOGIN_RETRIES);
         if (++ctx->login_retries < MAX_LOGIN_RETRIES) {
             uint8_t buf[256];
             int len = poc_build_login(ctx, buf, sizeof(buf));
@@ -84,7 +85,7 @@ static void io_check_timers(poc_ctx_t *ctx)
 
     /* Validate timeout */
     if (ls == LOGIN_SENT_VALIDATE && now - ctx->login_sent_at > VALIDATE_TIMEOUT_MS) {
-        poc_log("io: validate timeout");
+        poc_log_at(POC_LOG_WARNING, "login: server did not respond to auth (timed out)");
         atomic_store(&ctx->login_state, LOGIN_FAILED);
         poc_event_t evt = { .type = POC_EVT_LOGIN_ERROR,
                             .login_error = { .code = POC_ERR_TIMEOUT }};
@@ -123,7 +124,7 @@ static void io_start_reconnect(poc_ctx_t *ctx)
     }
 
     if (ctx->reconnect_delay_ms > RECONNECT_MAX_MS) {
-        poc_log("io: reconnect backoff exceeded %ds — giving up", RECONNECT_MAX_MS / 1000);
+        poc_log_at(POC_LOG_ERROR, "gave up reconnecting after %ds", RECONNECT_MAX_MS / 1000);
         ctx->reconnect_active = false;
         atomic_store(&ctx->state, POC_STATE_OFFLINE);
         atomic_store(&ctx->login_state, LOGIN_IDLE);
@@ -139,7 +140,7 @@ static void io_start_reconnect(poc_ctx_t *ctx)
     }
 
     ctx->reconnect_at = poc_mono_ms() + ctx->reconnect_delay_ms;
-    poc_log("io: reconnect in %dms (backoff)", ctx->reconnect_delay_ms);
+    poc_log("reconnecting in %ds...", ctx->reconnect_delay_ms / 1000);
 
     atomic_store(&ctx->state, POC_STATE_CONNECTING);
     poc_event_t evt = { .type = POC_EVT_STATE_CHANGE,
@@ -152,11 +153,11 @@ static bool io_try_reconnect(poc_ctx_t *ctx)
     if (!ctx->reconnect_active) return false;
     if (poc_mono_ms() < ctx->reconnect_at) return false;
 
-    poc_log("io: attempting reconnect to %s:%u", ctx->server_host, ctx->server_port);
+    poc_log("connecting to %s:%u...", ctx->server_host, ctx->server_port);
 
     int rc = poc_tcp_connect(ctx);
     if (rc != POC_OK) {
-        poc_log_at(POC_LOG_WARNING, "io: reconnect TCP failed (%d)", rc);
+        poc_log_at(POC_LOG_WARNING, "connection to %s:%u failed", ctx->server_host, ctx->server_port);
         io_start_reconnect(ctx);  /* double the backoff */
         return false;
     }
@@ -174,14 +175,14 @@ static bool io_try_reconnect(poc_ctx_t *ctx)
     ctx->login_retries = 0;
     ctx->reconnect_active = false;
 
-    poc_log("io: reconnected, login sent");
+    poc_log("connected, authenticating...");
     return true;
 }
 
 static void *io_thread_fn(void *arg)
 {
     poc_ctx_t *ctx = (poc_ctx_t *)arg;
-    poc_log("io: thread started");
+    poc_log_at(POC_LOG_DEBUG, "I/O thread started");
 
     while (atomic_load(&ctx->io_running)) {
         /* If we're in reconnect backoff, check if it's time to retry */
@@ -248,14 +249,14 @@ static void *io_thread_fn(void *arg)
         }
 
         if (tcp_dead) {
-            poc_log_at(POC_LOG_ERROR, "io: connection lost, starting reconnect");
+            poc_log_at(POC_LOG_ERROR, "connection lost to server");
             io_start_reconnect(ctx);
             continue;
         }
 
         /* Auth failure — no point retrying with the same credentials */
         if (atomic_load(&ctx->login_state) == LOGIN_FAILED) {
-            poc_log_at(POC_LOG_ERROR, "io: login failed, stopping");
+            poc_log_at(POC_LOG_ERROR, "login failed — disconnecting");
             break;
         }
 
@@ -264,7 +265,7 @@ static void *io_thread_fn(void *arg)
         poc_gps_tick(ctx);
     }
 
-    poc_log("io: thread exiting");
+    poc_log_at(POC_LOG_DEBUG, "I/O thread exiting");
     return NULL;
 }
 
@@ -333,7 +334,7 @@ poc_ctx_t *poc_create(const poc_config_t *cfg, const poc_callbacks_t *cb)
     atomic_store(&ctx->gps_valid, false);
     atomic_store(&ctx->gps_updated, false);
 
-    poc_log("ctx: created for %s@%s:%u", ctx->account, ctx->server_host, ctx->server_port);
+    poc_log("client: %s@%s:%u ready", ctx->account, ctx->server_host, ctx->server_port);
     return ctx;
 }
 
@@ -412,7 +413,7 @@ int poc_connect(poc_ctx_t *ctx)
                         .state_change = { .state = POC_STATE_CONNECTING }};
     poc_evt_push(&ctx->evt_queue, &evt);
 
-    poc_log("ctx: login sent, I/O thread running");
+    poc_log("connecting to %s:%u, authenticating...", ctx->server_host, ctx->server_port);
     return POC_OK;
 }
 
@@ -437,7 +438,7 @@ int poc_disconnect(poc_ctx_t *ctx)
 #if defined(__linux__) || defined(__GLIBC__)
         int jrc = pthread_timedjoin_np(ctx->io_thread, NULL, &ts);
         if (jrc != 0) {
-            poc_log_at(POC_LOG_WARNING, "io: thread join timed out, detaching");
+            poc_log_at(POC_LOG_WARNING, "I/O thread join timed out, detaching");
             pthread_detach(ctx->io_thread);
         }
 #else
@@ -657,7 +658,7 @@ int poc_ptt_send_audio(poc_ctx_t *ctx, const int16_t *pcm, int n_samples)
     while (offset + POC_AUDIO_FRAME_SAMPLES <= n_samples) {
         if (!poc_ring_push(&ctx->tx_ring, pcm + offset,
                            POC_AUDIO_FRAME_SAMPLES, 0, 0)) {
-            poc_log_at(POC_LOG_WARNING, "ctx: tx_ring full, dropping frame");
+            poc_log_at(POC_LOG_WARNING, "audio TX buffer full — dropping frame");
             break;
         }
         offset += POC_AUDIO_FRAME_SAMPLES;

@@ -1,5 +1,14 @@
-libpoc (0.1.0-1) unstable; urgency=low
+libpoc (1.0.0-1) stable; urgency=low
 
-  * Initial release.
+  * Initial stable release
+  * PoC signaling and voice transport protocol
+  * Speex audio codec support
+  * MS-framed TCP signaling and UDP voice transport
+  * Server-side state machine (poc_server_t)
+  * Message delivery ACK/NACK and offline notification
+  * FEC for voice frame recovery
+  * GPS position encoding/decoding
+  * AES encryption support
+  * 104 tests
 
- -- Brian <brian@example.com>  Wed, 02 Apr 2026 00:00:00 +0000
+ -- Brian <brian@mcalester.net>  Wed, 02 Apr 2026 00:00:00 +0000

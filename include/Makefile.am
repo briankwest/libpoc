@@ -1,2 +1,2 @@
 libpocincludedir = $(includedir)/libpoc
-libpocinclude_HEADERS = libpoc/poc.h libpoc/poc_proto.h libpoc/poc_server.h
+libpocinclude_HEADERS = libpoc/poc.h libpoc/poc_proto.h libpoc/poc_server.h libpoc/version.h

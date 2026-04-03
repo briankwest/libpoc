@@ -1,7 +1,7 @@
 Source: libpoc
 Section: hamradio
 Priority: optional
-Maintainer: Brian <brian@example.com>
+Maintainer: Brian <brian@mcalester.net>
 Build-Depends:
  debhelper-compat (= 13),
  dh-autoreconf,
