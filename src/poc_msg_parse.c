@@ -273,10 +273,16 @@ static void handle_challenge(poc_ctx_t *ctx, const uint8_t *data, int len)
     uint8_t vbuf[64];
     int vlen = poc_build_validate(ctx, vbuf, sizeof(vbuf));
     if (vlen > 0) {
-        poc_tcp_send_frame(ctx, vbuf, vlen);
-        atomic_store(&ctx->login_state, LOGIN_SENT_VALIDATE);
-        ctx->login_sent_at = poc_mono_ms();
-        poc_log("challenge: sent validate response");
+        int src = poc_tcp_send_frame(ctx, vbuf, vlen);
+        if (src == POC_OK) {
+            atomic_store(&ctx->login_state, LOGIN_SENT_VALIDATE);
+            ctx->login_sent_at = poc_mono_ms();
+            poc_log("challenge: sent validate response (%d bytes)", vlen);
+        } else {
+            poc_log_at(POC_LOG_ERROR, "challenge: validate send failed (%d)", src);
+        }
+    } else {
+        poc_log_at(POC_LOG_ERROR, "challenge: validate build failed (%d)", vlen);
     }
 }
 

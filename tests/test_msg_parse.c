@@ -3,6 +3,9 @@
  */
 
 #include "poc_internal.h"
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/socket.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -81,7 +84,9 @@ void test_msg_parse(void)
     {
         test_begin("parse: challenge advances login state to SENT_VALIDATE");
         poc_ctx_t *ctx = make_ctx();
-        ctx->tcp_fd = -1;
+        int sv[2];
+        socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+        ctx->tcp_fd = sv[0];  /* writable socket for validate send */
         snprintf(ctx->password_sha1, sizeof(ctx->password_sha1),
                  "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8");
 
@@ -94,6 +99,7 @@ void test_msg_parse(void)
         poc_parse_message(ctx, msg, 10);
         test_assert(ctx->login_state == LOGIN_SENT_VALIDATE,
                     "should advance to SENT_VALIDATE");
+        close(sv[0]); close(sv[1]);
         free(ctx);
     }
 

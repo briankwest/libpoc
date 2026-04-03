@@ -96,7 +96,7 @@ static void on_state(poc_ctx_t *ctx, poc_state_t state, void *ud)
     if (state == POC_STATE_ONLINE)
         async_printf(">>> Type 'help' for commands\n");
     if (state == POC_STATE_CONNECTING)
-        async_printf(">>> Reconnecting...\n");
+        async_printf(">>> Authenticating...\n");
 }
 
 static void on_login_error(poc_ctx_t *ctx, int code, const char *msg, void *ud)
