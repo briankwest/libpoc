@@ -419,7 +419,20 @@ int poc_disconnect(poc_ctx_t *ctx)
         poc_tcp_close(ctx);
         poc_udp_close(ctx);
         io_wakeup(ctx);
+
+        /* Timed join — don't hang forever if I/O thread is stuck */
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 2;  /* 2 second max wait */
+#if defined(__linux__) || defined(__GLIBC__)
+        int jrc = pthread_timedjoin_np(ctx->io_thread, NULL, &ts);
+        if (jrc != 0) {
+            poc_log_at(POC_LOG_WARNING, "io: thread join timed out, detaching");
+            pthread_detach(ctx->io_thread);
+        }
+#else
         pthread_join(ctx->io_thread, NULL);
+#endif
     } else {
         poc_tcp_close(ctx);
         poc_udp_close(ctx);
