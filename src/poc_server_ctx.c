@@ -349,10 +349,12 @@ static void srv_handle_ext_data(poc_server_t *srv, srv_client_t *cl, const uint8
         srv_broadcast_group(srv, target_id, relay, off, -1); /* include sender for echo */
     } else {
         srv_client_t *target = srv_find_client(srv, target_id);
-        if (target) srv_send_frame(target->fd, relay, off);
-        /* Also echo back to sender for DM-to-self */
-        if (!target || target->user_id == cl->user_id)
+        if (target) {
+            srv_send_frame(target->fd, relay, off);
+        } else {
+            /* Target not online — echo back to sender */
             srv_send_frame(cl->fd, relay, off);
+        }
     }
 
     if (srv->cb.on_message)
