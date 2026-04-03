@@ -128,6 +128,7 @@ typedef struct {
 
 static volatile int g_running = 1;
 static int g_log_level = 2; /* 0=ERR, 1=WRN, 2=INF, 3=DBG */
+static struct linenoiseState *g_srv_ls = NULL;
 static void handle_sig(int s) { (void)s; g_running = 0; }
 
 /* ── Helpers ────────────────────────────────────────────────────── */
@@ -163,6 +164,7 @@ static void slog_at(int level, const char *fmt, ...)
     localtime_r(&ts.tv_sec, &tm);
     static const char *tags[] = {"ERR", "WRN", "INF", "DBG"};
     const char *tag = (level >= 0 && level <= 3) ? tags[level] : "???";
+    if (g_srv_ls) linenoiseHide(g_srv_ls);
     fprintf(stderr, "[srv %02d:%02d:%02d.%03ld %s] ",
             tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000, tag);
     va_list ap;
@@ -170,6 +172,7 @@ static void slog_at(int level, const char *fmt, ...)
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
+    if (g_srv_ls) linenoiseShow(g_srv_ls);
 }
 
 /* Convenience macros */
@@ -825,13 +828,17 @@ int main(int argc, char **argv)
 
     slog("listening on %s:%d (tcp+udp)", srv.bind_addr, srv.port);
 
-    /* Setup console */
+    /* Setup console — multiplexed (non-blocking) linenoise */
     linenoiseSetCompletionCallback(srv_completion);
     linenoiseHistorySetMaxLen(50);
-    int stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK);
 
     printf("Type 'help' for server commands.\n");
+
+    char lnbuf[512];
+    struct linenoiseState srv_ls;
+    g_srv_ls = &srv_ls;
+    linenoiseEditStart(&srv_ls, STDIN_FILENO, STDOUT_FILENO,
+                       lnbuf, sizeof(lnbuf), "srv> ");
 
     /* Poll loop */
     while (g_running) {
@@ -862,17 +869,23 @@ int main(int argc, char **argv)
 
         /* Console input */
         if (fds[0].revents & POLLIN) {
-            fcntl(STDIN_FILENO, F_SETFL, stdin_flags); /* blocking for linenoise */
-            char *line = linenoise("srv> ");
-            fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK);
+            char *line = linenoiseEditFeed(&srv_ls);
+            if (line == linenoiseEditMore) goto skip_console;
+            linenoiseEditStop(&srv_ls);
             if (line) {
                 if (line[0]) {
                     linenoiseHistoryAdd(line);
                     srv_process_line(&srv, line);
                 }
                 linenoiseFree(line);
+            } else {
+                g_running = 0;  /* EOF / Ctrl-D */
             }
+            if (g_running)
+                linenoiseEditStart(&srv_ls, STDIN_FILENO, STDOUT_FILENO,
+                                   lnbuf, sizeof(lnbuf), "srv> ");
         }
+        skip_console:
 
         /* Accept new clients */
         if (fds[1].revents & POLLIN) {
@@ -919,6 +932,9 @@ int main(int argc, char **argv)
             }
         }
     }
+
+    linenoiseEditStop(&srv_ls);
+    g_srv_ls = NULL;
 
     slog("shutting down");
     for (int i = 0; i < srv.client_count; i++)
