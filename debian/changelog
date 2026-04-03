@@ -1,4 +1,4 @@
-libpoc (1.0.0-1) stable; urgency=low
+libpoc (1.0.1-1) stable; urgency=low
 
   * Initial stable release
   * PoC signaling and voice transport protocol

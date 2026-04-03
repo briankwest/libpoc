@@ -1,5 +1,5 @@
 AC_PREREQ([2.69])
-AC_INIT([libpoc], [1.0.0], [https://github.com/briankwest/libpoc/issues])
+AC_INIT([libpoc], [1.0.1], [https://github.com/briankwest/libpoc/issues])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIRS([m4])
 AM_INIT_AUTOMAKE([foreign subdir-objects -Wall])
