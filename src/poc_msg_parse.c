@@ -338,6 +338,20 @@ static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len)
             atomic_store(&ctx->ptt_active, false);
             poc_log("response: PTT denied");
         }
+        return;
+    }
+
+    /* Message delivery failure (0x25 = target unavailable) */
+    if (len >= 1 && data[0] != 0) {
+        int code = data[0];
+        const char *reason = "unknown";
+        if (code == 0x25) reason = "user offline";
+        poc_log_at(POC_LOG_WARNING, "response: delivery failed (0x%02x: %s)", code, reason);
+        poc_event_t evt = { .type = POC_EVT_MESSAGE };
+        evt.message.from_id = 0; /* from server */
+        snprintf(evt.message.text, sizeof(evt.message.text),
+                 "[delivery failed: %s]", reason);
+        poc_evt_push(&ctx->evt_queue, &evt);
     }
 }
 

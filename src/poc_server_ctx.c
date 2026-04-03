@@ -351,9 +351,14 @@ static void srv_handle_ext_data(poc_server_t *srv, srv_client_t *cl, const uint8
         srv_client_t *target = srv_find_client(srv, target_id);
         if (target) {
             srv_send_frame(target->fd, relay, off);
+            /* Send delivery ACK to sender */
+            uint8_t ack[4] = { cl->session_id, POC_NOTIFY_PKG_ACK, 0x00 };
+            srv_send_frame(cl->fd, ack, 3);
         } else {
-            /* Target not online — echo back to sender */
-            srv_send_frame(cl->fd, relay, off);
+            /* Target not online — notify sender */
+            poc_log_at(POC_LOG_INFO, "srv: user %u not online, notifying sender", target_id);
+            uint8_t nack[4] = { cl->session_id, POC_NOTIFY_RESPONSE, 0x25 }; /* 0x25 = target unavailable */
+            srv_send_frame(cl->fd, nack, 3);
         }
     }
 
