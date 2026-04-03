@@ -65,3 +65,7 @@ test-suite.log
 *~
 .DS_Store
 ._*
+examples/poc_server
+examples/poc_cli
+tests/test_libpoc
+tests/test_codec_wav
