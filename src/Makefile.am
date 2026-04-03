@@ -11,6 +11,7 @@ libpoc_la_SOURCES = \
 	poc_encrypt.c \
 	poc_gps.c \
 	poc_fec.c \
+	poc_server_ctx.c \
 	poc_util.c
 
 libpoc_la_CFLAGS = \
