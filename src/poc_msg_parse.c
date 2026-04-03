@@ -34,6 +34,11 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
 
     ctx->last_activity = poc_mono_ms();
 
+    /* Lock shared state: groups[], active_group_id, session_id are
+     * accessed by both I/O thread (here) and caller thread (public API).
+     * Hold the lock for the entire parse dispatch. */
+    pthread_mutex_lock(&ctx->sig_mutex);
+
     switch (cmd) {
     case CMD_CHALLENGE:
         handle_challenge(ctx, payload, plen);
@@ -230,6 +235,7 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
         break;
     }
 
+    pthread_mutex_unlock(&ctx->sig_mutex);
     return POC_OK;
 }
 

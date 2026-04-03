@@ -291,6 +291,7 @@ poc_ctx_t *poc_create(const poc_config_t *cfg, const poc_callbacks_t *cb)
     atomic_store(&ctx->io_running, false);
     atomic_store(&ctx->ptt_active, false);
     atomic_store(&ctx->ptt_rx_active, false);
+    pthread_mutex_init(&ctx->sig_mutex, NULL);
     ctx->tcp_fd = -1;
     ctx->udp_fd = -1;
     ctx->io_wakeup[0] = -1;
@@ -333,6 +334,7 @@ void poc_destroy(poc_ctx_t *ctx)
     poc_fec_destroy(&ctx->fec);
     poc_ring_destroy(&ctx->rx_ring);
     poc_ring_destroy(&ctx->tx_ring);
+    pthread_mutex_destroy(&ctx->sig_mutex);
     free(ctx);
 }
 
@@ -529,6 +531,16 @@ int poc_poll(poc_ctx_t *ctx, int timeout_ms)
     return POC_OK;
 }
 
+/* ── Locked helpers for caller-thread TCP send ──────────────────── */
+
+static int locked_tcp_send(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len)
+{
+    pthread_mutex_lock(&ctx->sig_mutex);
+    int rc = poc_tcp_send_frame(ctx, payload, len);
+    pthread_mutex_unlock(&ctx->sig_mutex);
+    return rc;
+}
+
 /* ── Public API — these push into rings or send on I/O thread ──── */
 
 int poc_enter_group(poc_ctx_t *ctx, uint32_t group_id)
@@ -540,9 +552,11 @@ int poc_enter_group(poc_ctx_t *ctx, uint32_t group_id)
     int len = poc_build_enter_group(ctx, group_id, buf, sizeof(buf));
     if (len < 0) return len;
 
+    pthread_mutex_lock(&ctx->sig_mutex);
     int rc = poc_tcp_send_frame(ctx, buf, len);
     if (rc == POC_OK)
         ctx->active_group_id = group_id;
+    pthread_mutex_unlock(&ctx->sig_mutex);
     return rc;
 }
 
@@ -555,9 +569,11 @@ int poc_leave_group(poc_ctx_t *ctx)
     int len = poc_build_leave_group(ctx, buf, sizeof(buf));
     if (len < 0) return len;
 
+    pthread_mutex_lock(&ctx->sig_mutex);
     int rc = poc_tcp_send_frame(ctx, buf, len);
     if (rc == POC_OK)
         ctx->active_group_id = 0;
+    pthread_mutex_unlock(&ctx->sig_mutex);
     return rc;
 }
 
@@ -572,7 +588,7 @@ int poc_ptt_start(poc_ctx_t *ctx)
     int len = poc_build_start_ptt(ctx, buf, sizeof(buf));
     if (len < 0) return len;
 
-    int rc = poc_tcp_send_frame(ctx, buf, len);
+    int rc = locked_tcp_send(ctx, buf, len);
     if (rc == POC_OK)
         atomic_store(&ctx->ptt_active, true);
     return rc;
@@ -587,7 +603,7 @@ int poc_ptt_stop(poc_ctx_t *ctx)
     int len = poc_build_end_ptt(ctx, buf, sizeof(buf));
     if (len < 0) return len;
 
-    int rc = poc_tcp_send_frame(ctx, buf, len);
+    int rc = locked_tcp_send(ctx, buf, len);
     atomic_store(&ctx->ptt_active, false);
     return rc;
 }
@@ -630,7 +646,7 @@ int poc_send_group_msg(poc_ctx_t *ctx, uint32_t group_id, const char *msg)
     uint8_t buf[512];
     int len = poc_build_send_group_msg(ctx, group_id, msg, buf, sizeof(buf));
     if (len < 0) return len;
-    return poc_tcp_send_frame(ctx, buf, len);
+    return locked_tcp_send(ctx, buf, len);
 }
 
 int poc_send_user_msg(poc_ctx_t *ctx, uint32_t user_id, const char *msg)
@@ -640,7 +656,7 @@ int poc_send_user_msg(poc_ctx_t *ctx, uint32_t user_id, const char *msg)
     uint8_t buf[512];
     int len = poc_build_send_user_msg(ctx, user_id, msg, buf, sizeof(buf));
     if (len < 0) return len;
-    return poc_tcp_send_frame(ctx, buf, len);
+    return locked_tcp_send(ctx, buf, len);
 }
 
 int poc_call_user(poc_ctx_t *ctx, uint32_t user_id)
@@ -649,14 +665,14 @@ int poc_call_user(poc_ctx_t *ctx, uint32_t user_id)
         return POC_ERR_STATE;
     /* Private call: StartPTT with target user ID */
     uint8_t buf[64];
-    ctx->session_id++;
+    pthread_mutex_lock(&ctx->sig_mutex); ctx->session_id++;
     buf[0] = ctx->session_id;
     poc_write32(buf + 1, ctx->user_id);
     buf[5] = CMD_START_PTT;
     buf[6] = 0;  /* Speex codec */
     poc_write16(buf + 7, 0x0000);
     poc_write32(buf + 9, user_id);
-    int rc = poc_tcp_send_frame(ctx, buf, 13);
+    int rc = poc_tcp_send_frame(ctx, buf, 13); pthread_mutex_unlock(&ctx->sig_mutex);
     if (rc == POC_OK)
         atomic_store(&ctx->ptt_active, true);
     return rc;
@@ -674,14 +690,20 @@ bool poc_is_encrypted(const poc_ctx_t *ctx)
 
 int poc_get_group_count(const poc_ctx_t *ctx)
 {
-    return ctx ? ctx->group_count : 0;
+    if (!ctx) return 0;
+    pthread_mutex_lock(&((poc_ctx_t *)ctx)->sig_mutex);
+    int n = ctx->group_count;
+    pthread_mutex_unlock(&((poc_ctx_t *)ctx)->sig_mutex);
+    return n;
 }
 
 int poc_get_groups(const poc_ctx_t *ctx, poc_group_t *out, int max)
 {
     if (!ctx || !out) return 0;
+    pthread_mutex_lock(&((poc_ctx_t *)ctx)->sig_mutex);
     int n = ctx->group_count < max ? ctx->group_count : max;
     memcpy(out, ctx->groups, n * sizeof(poc_group_t));
+    pthread_mutex_unlock(&((poc_ctx_t *)ctx)->sig_mutex);
     return n;
 }
 
@@ -715,7 +737,7 @@ static int send_user_id_list_cmd(poc_ctx_t *ctx, uint8_t cmd,
     for (int i = 0; i < count && off + 4 <= (int)sizeof(buf); i++) {
         poc_write32(buf + off, ids[i]); off += 4;
     }
-    return poc_tcp_send_frame(ctx, buf, off);
+    return locked_tcp_send(ctx, buf, off);
 }
 
 static int send_group_cmd(poc_ctx_t *ctx, uint8_t cmd, uint32_t group_id)
@@ -728,7 +750,7 @@ static int send_group_cmd(poc_ctx_t *ctx, uint8_t cmd, uint32_t group_id)
     poc_write32(buf + off, ctx->user_id); off += 4;
     buf[off++] = cmd;
     poc_write32(buf + off, group_id); off += 4;
-    return poc_tcp_send_frame(ctx, buf, off);
+    return locked_tcp_send(ctx, buf, off);
 }
 
 int poc_invite_tmp_group(poc_ctx_t *ctx, const uint32_t *user_ids, int count)
@@ -779,7 +801,7 @@ int poc_send_sos(poc_ctx_t *ctx, int alert_type)
     buf[off++] = CMD_NOTIFY_EXT_DATA;  /* SOS uses ext data with special prefix */
     buf[off++] = 0xFF;  /* SOS marker */
     buf[off++] = (uint8_t)alert_type;
-    return poc_tcp_send_frame(ctx, buf, off);
+    return locked_tcp_send(ctx, buf, off);
 }
 
 int poc_cancel_sos(poc_ctx_t *ctx)
@@ -792,7 +814,7 @@ int poc_cancel_sos(poc_ctx_t *ctx)
     poc_write32(buf + off, ctx->user_id); off += 4;
     buf[off++] = CMD_NOTIFY_EXT_DATA;
     buf[off++] = 0xFE;  /* SOS cancel marker */
-    return poc_tcp_send_frame(ctx, buf, off);
+    return locked_tcp_send(ctx, buf, off);
 }
 
 int poc_request_voice_message(poc_ctx_t *ctx, uint64_t note_id)
@@ -806,5 +828,5 @@ int poc_request_voice_message(poc_ctx_t *ctx, uint64_t note_id)
     buf[off++] = CMD_VOICE_MESSAGE;
     poc_write32(buf + off, (uint32_t)(note_id >> 32)); off += 4;
     poc_write32(buf + off, (uint32_t)(note_id & 0xFFFFFFFF)); off += 4;
-    return poc_tcp_send_frame(ctx, buf, off);
+    return locked_tcp_send(ctx, buf, off);
 }

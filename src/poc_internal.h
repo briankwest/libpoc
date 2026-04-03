@@ -193,13 +193,19 @@ struct poc_ctx {
     /* State (written by I/O thread, read by both) */
     _Atomic poc_state_t  state;
     _Atomic login_state_t login_state;
-    uint8_t         session_id;     /* I/O thread only */
     uint32_t        user_id;        /* I/O thread only after challenge */
     uint32_t        challenge_nonce;
     uint32_t        privilege;
     int             login_retries;
 
-    /* TCP (I/O thread only) */
+    /* Mutex: protects session_id, tcp_fd (send), groups[], active_group_id.
+     * Both the I/O thread and caller thread send TCP frames and modify
+     * group state. This mutex serializes those accesses. The audio rings
+     * and event queue are lock-free and do NOT use this mutex. */
+    pthread_mutex_t sig_mutex;
+    uint8_t         session_id;     /* protected by sig_mutex */
+
+    /* TCP (send protected by sig_mutex, recv by I/O thread only) */
     int             tcp_fd;
     uint8_t         tcp_recv_buf[TCP_RECV_BUF_SZ];
     int             tcp_recv_len;
@@ -222,7 +228,7 @@ struct poc_ctx {
     uint32_t        ptt_speaker_id;
     char            ptt_speaker_name[64];
 
-    /* Groups (I/O thread only for now) */
+    /* Groups (protected by sig_mutex) */
     poc_group_t     groups[MAX_GROUPS];
     int             group_count;
     uint32_t        active_group_id;
