@@ -63,10 +63,7 @@ static void on_login_error(poc_ctx_t *ctx, int code, const char *msg, void *ud)
 {
     (void)ctx; (void)ud;
     printf("\n>>> LOGIN ERROR: %d — %s\n", code, msg);
-    if (code == POC_ERR_NETWORK) {
-        printf(">>> Server unreachable. Giving up.\n");
-        running = 0;
-    }
+    running = 0;
 }
 
 static void on_ptt_start(poc_ctx_t *ctx, uint32_t speaker, const char *name,
