@@ -13,6 +13,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <time.h>
 #include <stdarg.h>
 #include <math.h>
@@ -353,6 +354,10 @@ int main(int argc, char **argv)
     /* Setup linenoise multiplexed (non-blocking) API */
     linenoiseSetCompletionCallback(completion);
     linenoiseHistorySetMaxLen(100);
+
+    /* Make stdin non-blocking so linenoiseEditFeed never blocks the poll loop */
+    int stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK);
 
     char lnbuf[512];
     struct linenoiseState ls;

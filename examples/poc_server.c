@@ -861,6 +861,10 @@ int main(int argc, char **argv)
     linenoiseSetCompletionCallback(srv_completion);
     linenoiseHistorySetMaxLen(50);
 
+    /* Make stdin non-blocking so linenoiseEditFeed never blocks the poll loop */
+    int stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK);
+
     printf("Type 'help' for server commands.\n");
 
     char lnbuf[512];
@@ -1032,14 +1036,21 @@ static void srv_cmd_users(server_t *srv)
 
 static void srv_cmd_kick(server_t *srv, const char *args)
 {
-    int idx = atoi(args);
-    if (idx < 0 || idx >= srv->client_count) {
-        printf("Invalid client index. Use 'clients' to list.\n");
-        return;
-    }
-    printf("Kicking client %d ('%s')...\n", idx, srv->clients[idx].account);
+    if (!args || !*args) { printf("Usage: kick <user_id or account>\n"); return; }
 
-    /* Send force exit notification */
+    /* Find by user_id or account name */
+    uint32_t uid = atoi(args);
+    int idx = -1;
+    for (int i = 0; i < srv->client_count; i++) {
+        if ((uid > 0 && srv->clients[i].user_id == uid) ||
+            strcmp(srv->clients[i].account, args) == 0) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) { printf("Client '%s' not found. Use 'clients' to list.\n", args); return; }
+
+    printf("Kicking '%s' (user_id=%u)...\n", srv->clients[idx].account, srv->clients[idx].user_id);
     uint8_t msg[4] = {0, 0x2D}; /* CMD_FORCE_EXIT */
     tcp_send_frame(srv->clients[idx].fd, msg, 2);
     disconnect_client(srv, idx);
@@ -1074,7 +1085,7 @@ static void srv_cmd_help(void)
     printf("  clients              List connected clients\n");
     printf("  groups               List groups with status\n");
     printf("  users                List registered users\n");
-    printf("  kick <index>         Disconnect a client\n");
+    printf("  kick <id|account>    Disconnect a client by user_id or name\n");
     printf("  broadcast <msg>      Send message to all clients\n");
     printf("  shutdown             Stop the server\n");
     printf("  help                 Show this help\n");
