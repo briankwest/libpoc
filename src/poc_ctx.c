@@ -17,6 +17,9 @@
 #include <poll.h>
 #include <errno.h>
 
+/* Forward declaration */
+static int locked_tcp_send(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len);
+
 /* ── I/O thread ─────────────────────────────────────────────────── */
 
 static void io_drain_tx(poc_ctx_t *ctx)
@@ -373,23 +376,9 @@ int poc_connect(poc_ctx_t *ctx)
     /* UDP */
     poc_udp_open(ctx);
 
-    /* Send login */
-    uint8_t buf[256];
-    int len = poc_build_login(ctx, buf, sizeof(buf));
-    if (len < 0) {
-        poc_tcp_close(ctx);
-        return POC_ERR;
-    }
-    rc = poc_tcp_send_frame(ctx, buf, len);
-    if (rc != POC_OK) {
-        poc_tcp_close(ctx);
-        return rc;
-    }
-
-    atomic_store(&ctx->login_state, LOGIN_SENT_LOGIN);
-    ctx->login_sent_at = poc_mono_ms();
-
-    /* Start I/O thread */
+    /* Start I/O thread BEFORE sending login so it's already polling
+     * when the server's challenge response arrives. Avoids a race
+     * where the response arrives before the thread's first poll(). */
     atomic_store(&ctx->io_running, true);
     if (pthread_create(&ctx->io_thread, NULL, io_thread_fn, ctx) != 0) {
         atomic_store(&ctx->io_running, false);
@@ -397,6 +386,22 @@ int poc_connect(poc_ctx_t *ctx)
         poc_udp_close(ctx);
         return POC_ERR;
     }
+
+    /* Send login — I/O thread is already running and will catch the response */
+    uint8_t buf[256];
+    int len = poc_build_login(ctx, buf, sizeof(buf));
+    if (len < 0) {
+        poc_disconnect(ctx);
+        return POC_ERR;
+    }
+    rc = locked_tcp_send(ctx, buf, len);
+    if (rc != POC_OK) {
+        poc_disconnect(ctx);
+        return rc;
+    }
+
+    atomic_store(&ctx->login_state, LOGIN_SENT_LOGIN);
+    ctx->login_sent_at = poc_mono_ms();
 
     /* Push CONNECTING event for caller */
     poc_event_t evt = { .type = POC_EVT_STATE_CHANGE,
