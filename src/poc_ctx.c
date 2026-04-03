@@ -250,6 +250,12 @@ static void *io_thread_fn(void *arg)
             continue;
         }
 
+        /* Auth failure — no point retrying with the same credentials */
+        if (atomic_load(&ctx->login_state) == LOGIN_FAILED) {
+            poc_log_at(POC_LOG_ERROR, "io: login failed, stopping");
+            break;
+        }
+
         io_drain_tx(ctx);
         io_check_timers(ctx);
         poc_gps_tick(ctx);

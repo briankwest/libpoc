@@ -439,4 +439,62 @@ void test_msg_parse(void)
         test_assert(found, "should have voice_message event");
         free(ctx);
     }
+
+    /* ── Auth failure handling ── */
+
+    {
+        test_begin("parse: response with error during validate fires login_error");
+        poc_ctx_t *ctx = make_ctx();
+        ctx->login_state = LOGIN_SENT_VALIDATE;
+        poc_evt_init(&ctx->evt_queue);
+
+        /* Server sends: [session=0x01][cmd=0x01][error_code=0x01] */
+        uint8_t msg[4];
+        msg[0] = 0x01;
+        msg[1] = CMD_LOGIN;  /* 0x01 = response */
+        msg[2] = 0x01;       /* non-zero = auth failed */
+
+        poc_parse_message(ctx, msg, 3);
+
+        test_assert(ctx->login_state == LOGIN_FAILED, "should be LOGIN_FAILED");
+        test_assert(ctx->state == POC_STATE_OFFLINE, "should be OFFLINE");
+
+        poc_event_t evt;
+        int found_err = 0, found_offline = 0;
+        while (poc_evt_pop(&ctx->evt_queue, &evt)) {
+            if (evt.type == POC_EVT_LOGIN_ERROR) {
+                found_err = 1;
+                test_assert(evt.login_error.code == POC_ERR_AUTH, "code=AUTH");
+            }
+            if (evt.type == POC_EVT_STATE_CHANGE && evt.state_change.state == POC_STATE_OFFLINE)
+                found_offline = 1;
+        }
+        test_assert(found_err, "should have login_error event");
+        test_assert(found_offline, "should have offline event");
+        free(ctx);
+    }
+
+    {
+        test_begin("parse: response with success during validate doesn't error");
+        poc_ctx_t *ctx = make_ctx();
+        ctx->login_state = LOGIN_SENT_VALIDATE;
+        poc_evt_init(&ctx->evt_queue);
+
+        uint8_t msg[4];
+        msg[0] = 0x01;
+        msg[1] = CMD_LOGIN;
+        msg[2] = 0x00;  /* success */
+
+        poc_parse_message(ctx, msg, 3);
+
+        /* Should NOT transition to failed */
+        test_assert(ctx->login_state == LOGIN_SENT_VALIDATE, "still in validate");
+
+        poc_event_t evt;
+        int found_err = 0;
+        while (poc_evt_pop(&ctx->evt_queue, &evt))
+            if (evt.type == POC_EVT_LOGIN_ERROR) found_err = 1;
+        test_assert(!found_err, "should NOT have error event");
+        free(ctx);
+    }
 }

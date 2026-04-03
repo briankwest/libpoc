@@ -288,13 +288,42 @@ static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len)
 {
     poc_log("response: len=%d", len);
 
+    /* Login/validate error: server rejected our HMAC or account */
     if (atomic_load(&ctx->login_state) == LOGIN_SENT_VALIDATE) {
-        /* This might be a login error — if user_data follows, we're OK */
-        poc_log("response: during validate phase");
+        int code = (len >= 1) ? data[0] : -1;
+        if (code != 0) {
+            /* Non-zero = auth failed */
+            const char *reason = "authentication failed";
+            int err = POC_ERR_AUTH;
+            switch (code) {
+            case 0x06: reason = "account not found"; break;
+            case 0x08: reason = "version mismatch"; break;
+            case 0x0B: reason = "ICCID mismatch"; break;
+            case 0x0C: reason = "IMEI mismatch"; break;
+            default: break;
+            }
+            poc_log_at(POC_LOG_ERROR, "login: rejected (code=0x%02x: %s)", code, reason);
+
+            atomic_store(&ctx->login_state, LOGIN_FAILED);
+            atomic_store(&ctx->state, POC_STATE_OFFLINE);
+
+            poc_event_t evt = { .type = POC_EVT_LOGIN_ERROR,
+                                .login_error = { .code = err }};
+            snprintf(evt.login_error.msg, sizeof(evt.login_error.msg), "%s", reason);
+            poc_evt_push(&ctx->evt_queue, &evt);
+
+            poc_event_t sevt = { .type = POC_EVT_STATE_CHANGE,
+                                 .state_change = { .state = POC_STATE_OFFLINE }};
+            poc_evt_push(&ctx->evt_queue, &sevt);
+            return;
+        }
+        /* code == 0: success — UserData (0x0B) will follow shortly */
+        poc_log("response: validate accepted, waiting for user data");
+        return;
     }
 
+    /* PTT grant/deny */
     if (atomic_load(&ctx->ptt_active)) {
-        /* PTT grant/deny comes as a response */
         bool granted = (len >= 1 && data[0] == 0);
         poc_event_t evt = { .type = POC_EVT_PTT_GRANTED,
                             .ptt_granted = { .granted = granted }};

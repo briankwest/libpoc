@@ -347,7 +347,6 @@ static void handle_login(server_t *srv, client_t *cl, const uint8_t *data, int l
         uint8_t err[4] = {0, CMD_LOGIN, 0x06};
         tcp_send_frame(cl->fd, err, 3);
         return;
-        return;
     }
 
     cl->user_id = user->user_id;
@@ -406,7 +405,6 @@ static void handle_validate(server_t *srv, client_t *cl, const uint8_t *data, in
         /* Send validate error */
         uint8_t err[4] = {session, CMD_LOGIN, 0x01};
         tcp_send_frame(cl->fd, err, 3);
-        return;
         return;
     }
 
