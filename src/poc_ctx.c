@@ -387,21 +387,25 @@ int poc_connect(poc_ctx_t *ctx)
         return POC_ERR;
     }
 
+    /* Set login state BEFORE sending — the I/O thread may process the
+     * server's response before we get back from the send call. */
+    atomic_store(&ctx->login_state, LOGIN_SENT_LOGIN);
+    ctx->login_sent_at = poc_mono_ms();
+
     /* Send login — I/O thread is already running and will catch the response */
     uint8_t buf[256];
     int len = poc_build_login(ctx, buf, sizeof(buf));
     if (len < 0) {
+        atomic_store(&ctx->login_state, LOGIN_IDLE);
         poc_disconnect(ctx);
         return POC_ERR;
     }
     rc = locked_tcp_send(ctx, buf, len);
     if (rc != POC_OK) {
+        atomic_store(&ctx->login_state, LOGIN_IDLE);
         poc_disconnect(ctx);
         return rc;
     }
-
-    atomic_store(&ctx->login_state, LOGIN_SENT_LOGIN);
-    ctx->login_sent_at = poc_mono_ms();
 
     /* Push CONNECTING event for caller */
     poc_event_t evt = { .type = POC_EVT_STATE_CHANGE,
@@ -428,7 +432,8 @@ int poc_disconnect(poc_ctx_t *ctx)
         /* Timed join — don't hang forever if I/O thread is stuck */
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_sec += 2;  /* 2 second max wait */
+        ts.tv_nsec += 500000000;  /* 500ms max wait */
+        if (ts.tv_nsec >= 1000000000) { ts.tv_nsec -= 1000000000; ts.tv_sec++; }
 #if defined(__linux__) || defined(__GLIBC__)
         int jrc = pthread_timedjoin_np(ctx->io_thread, NULL, &ts);
         if (jrc != 0) {

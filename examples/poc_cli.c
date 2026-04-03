@@ -42,11 +42,8 @@ static void on_signal(int sig)
 {
     (void)sig;
     running = 0;
-    /* Reset terminal from raw mode so we don't hang */
-    if (g_ls) {
-        linenoiseEditStop(g_ls);
-        g_ls = NULL;
-    }
+    /* Do NOT call linenoiseEditStop here — it's not async-signal-safe.
+     * The main loop will clean up after exiting. */
 }
 
 /* ── Logging callback ───────────────────────────────────────────── */
