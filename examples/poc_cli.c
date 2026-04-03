@@ -174,14 +174,23 @@ static void do_ptt(poc_ctx_t *ctx)
     printf(">>> PTT done.\n");
 }
 
-static void do_msg(poc_ctx_t *ctx, const char *text)
+static void do_msg(poc_ctx_t *ctx, const char *args)
 {
-    if (g_group_id == 0) {
-        printf(">>> No group to send to. Specify group_id on command line.\n");
+    /* Try "msg <group_id> <text>" first */
+    uint32_t gid = 0;
+    char text[256] = "";
+    if (sscanf(args, "%u %255[^\n]", &gid, text) >= 2 && gid > 0) {
+        int rc = poc_send_group_msg(ctx, gid, text);
+        printf(">>> Message to group %u sent (%d)\n", gid, rc);
         return;
     }
-    int rc = poc_send_group_msg(ctx, g_group_id, text);
-    printf(">>> Group message sent (%d)\n", rc);
+    /* Fall back to active group */
+    if (g_group_id == 0) {
+        printf(">>> Usage: msg <group_id> <text>  or  msg <text> (if in a group)\n");
+        return;
+    }
+    int rc = poc_send_group_msg(ctx, g_group_id, args);
+    printf(">>> Message to group %u sent (%d)\n", g_group_id, rc);
 }
 
 static void do_dm(poc_ctx_t *ctx, const char *args)
@@ -223,12 +232,37 @@ static void process_stdin(poc_ctx_t *ctx)
     } else if (strcmp(line, "sos cancel") == 0) {
         int rc = poc_cancel_sos(ctx);
         printf(">>> SOS cancel sent (%d)\n", rc);
+    } else if (strcmp(line, "groups") == 0) {
+        poc_group_t grps[64];
+        int n = poc_get_groups(ctx, grps, 64);
+        printf(">>> Groups (%d):\n", n);
+        for (int i = 0; i < n; i++)
+            printf("    [%u] %s%s\n", grps[i].id, grps[i].name,
+                   grps[i].id == g_group_id ? " (active)" : "");
+    } else if (strncmp(line, "join ", 5) == 0) {
+        uint32_t gid = atoi(line + 5);
+        if (gid == 0) {
+            printf(">>> Usage: join <group_id>\n");
+        } else {
+            int rc = poc_enter_group(ctx, gid);
+            if (rc == POC_OK) {
+                g_group_id = gid;
+                printf(">>> Joined group %u\n", gid);
+            } else {
+                printf(">>> Join failed: %d\n", rc);
+            }
+        }
+    } else if (strcmp(line, "leave") == 0) {
+        poc_leave_group(ctx);
+        g_group_id = 0;
+        printf(">>> Left group\n");
     } else if (strcmp(line, "state") == 0) {
         const char *names[] = { "OFFLINE", "CONNECTING", "ONLINE", "LOGOUT" };
-        printf(">>> State: %s  User ID: %u  Account: %s\n",
-               names[poc_get_state(ctx)], poc_get_user_id(ctx), poc_get_account(ctx));
+        printf(">>> State: %s  User ID: %u  Account: %s  Group: %u\n",
+               names[poc_get_state(ctx)], poc_get_user_id(ctx),
+               poc_get_account(ctx), g_group_id);
     } else {
-        printf(">>> Unknown command. Try: ptt, msg <text>, dm <id> <text>, state, quit\n");
+        printf(">>> Commands: ptt, msg [gid] <text>, dm <uid> <text>, groups, join <gid>, leave, sos, state, quit\n");
     }
 }
 
@@ -249,12 +283,15 @@ int main(int argc, char **argv)
         fprintf(stderr, "  -v               Verbose (debug logging)\n");
         fprintf(stderr, "  -q               Quiet (errors only)\n");
         fprintf(stderr, "\nCommands once connected:\n");
-        fprintf(stderr, "  ptt              Send 1s tone via PTT\n");
-        fprintf(stderr, "  msg <text>       Send group message\n");
-        fprintf(stderr, "  dm <id> <text>   Send private message\n");
-        fprintf(stderr, "  sos              Send SOS alert\n");
-        fprintf(stderr, "  state            Show connection state\n");
-        fprintf(stderr, "  quit             Disconnect\n");
+        fprintf(stderr, "  groups               List available groups\n");
+        fprintf(stderr, "  join <group_id>      Join/switch group\n");
+        fprintf(stderr, "  leave                Leave current group\n");
+        fprintf(stderr, "  ptt                  Send 1s tone via PTT\n");
+        fprintf(stderr, "  msg [gid] <text>     Send group message\n");
+        fprintf(stderr, "  dm <uid> <text>      Send private message\n");
+        fprintf(stderr, "  sos                  Send SOS alert\n");
+        fprintf(stderr, "  state                Show connection state\n");
+        fprintf(stderr, "  quit                 Disconnect\n");
         return 1;
     }
 
