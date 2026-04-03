@@ -30,7 +30,7 @@ test_libpoc_LDADD = \
 noinst_PROGRAMS = test_codec_wav
 
 test_codec_wav_SOURCES = test_codec_wav.c
-test_codec_wav_CFLAGS = $(test_libpoc_CFLAGS)
+test_codec_wav_CFLAGS = $(test_libpoc_CFLAGS) -Wno-format-truncation
 test_codec_wav_LDADD = $(test_libpoc_LDADD)
 
 TESTS = test_libpoc

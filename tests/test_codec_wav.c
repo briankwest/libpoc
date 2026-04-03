@@ -54,6 +54,7 @@ static int wav_write(const char *path, const int16_t *samples, int n, int rate)
 static int resample(const int16_t *in, int in_len, int in_rate, int16_t **out, int out_rate)
 {
     int out_len = (int)((int64_t)in_len * out_rate / in_rate);
+    if (out_len <= 0) { *out = NULL; return 0; }
     *out = malloc(out_len * sizeof(int16_t));
     if (!*out) return 0;
     for (int i = 0; i < out_len; i++) {
@@ -69,7 +70,7 @@ static int resample(const int16_t *in, int in_len, int in_rate, int16_t **out, i
 int main(int argc, char **argv)
 {
     const char *input_dir = (argc > 1) ? argv[1] : "tests/wav";
-    char speex_dir[512];
+    char speex_dir[1024];
     snprintf(speex_dir, sizeof(speex_dir), "%s/speex", input_dir);
     mkdir(speex_dir, 0755);
 
@@ -87,7 +88,7 @@ int main(int argc, char **argv)
         int len = strlen(ent->d_name);
         if (len < 5 || strcmp(ent->d_name + len - 4, ".wav") != 0) continue;
 
-        char inpath[512];
+        char inpath[1024];
         snprintf(inpath, sizeof(inpath), "%s/%s", input_dir, ent->d_name);
         wav_data_t wav;
         if (wav_read(inpath, &wav) < 0) continue;
@@ -121,7 +122,7 @@ int main(int argc, char **argv)
         }
         poc_speex_destroy(&spx);
 
-        char outpath[512];
+        char outpath[1024];
         snprintf(outpath, sizeof(outpath), "%s/%s", speex_dir, ent->d_name);
         if (out_n > 0 && wav_write(outpath, out, out_n, 8000) == 0) {
             printf("  OK\n"); ok++;

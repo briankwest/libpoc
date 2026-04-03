@@ -333,7 +333,10 @@ static void handle_login(server_t *srv, client_t *cl, const uint8_t *data, int l
     user_def_t *user = find_user(srv, account);
     if (!user) {
         slog("login: unknown account '%s'", account);
-        /* TODO: send error response */
+        /* Send login error */
+        uint8_t err[4] = {0, CMD_LOGIN, 0x06};
+        tcp_send_frame(cl->fd, err, 3);
+        return;
         return;
     }
 
@@ -390,7 +393,10 @@ static void handle_validate(server_t *srv, client_t *cl, const uint8_t *data, in
 
     if (memcmp(client_hmac, expected, 20) != 0) {
         slog("validate: HMAC mismatch for '%s'", cl->account);
-        /* TODO: send error, disconnect */
+        /* Send validate error */
+        uint8_t err[4] = {session, CMD_LOGIN, 0x01};
+        tcp_send_frame(cl->fd, err, 3);
+        return;
         return;
     }
 
@@ -467,7 +473,7 @@ static void handle_enter_group(server_t *srv, client_t *cl, const uint8_t *data,
     broadcast_group(srv, group_id, notify, off, cl->fd);
 }
 
-static void handle_start_ptt(server_t *srv, client_t *cl, const uint8_t *data, int len)
+static void handle_start_ptt(server_t *srv, client_t *cl, const uint8_t *data __attribute__((unused)), int len __attribute__((unused)))
 {
     if (cl->active_group == 0) {
         slog("ptt: '%s' not in a group", cl->account);
@@ -513,7 +519,7 @@ static void handle_start_ptt(server_t *srv, client_t *cl, const uint8_t *data, i
     broadcast_group(srv, cl->active_group, notify, off, cl->fd);
 }
 
-static void handle_end_ptt(server_t *srv, client_t *cl, const uint8_t *data, int len)
+static void handle_end_ptt(server_t *srv, client_t *cl, const uint8_t *data __attribute__((unused)), int len __attribute__((unused)))
 {
     if (cl->active_group == 0) return;
 

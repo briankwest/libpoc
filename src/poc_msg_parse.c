@@ -406,7 +406,7 @@ static void handle_end_ptt(poc_ctx_t *ctx, const uint8_t *data, int len)
     poc_evt_push(&ctx->evt_queue, &evt);
 }
 
-static void handle_force_exit(poc_ctx_t *ctx, const uint8_t *data, int len)
+static void handle_force_exit(poc_ctx_t *ctx, const uint8_t *data __attribute__((unused)), int len __attribute__((unused)))
 {
     poc_log("force_exit: stunned by server");
     atomic_store(&ctx->state, POC_STATE_OFFLINE);
