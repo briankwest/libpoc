@@ -19,13 +19,29 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <math.h>
+#include <time.h>
 #include <poll.h>
 
 static volatile int running = 1;
 static poc_ctx_t *g_ctx = NULL;
 static uint32_t g_group_id = 0;
+static int g_log_level = POC_LOG_INFO;
 
 static void on_signal(int sig) { (void)sig; running = 0; }
+
+static void cli_log(int level, const char *msg, void *ud)
+{
+    (void)ud;
+    static const char *tags[] = {"ERR", "WRN", "INF", "DBG"};
+    const char *tag = (level >= 0 && level <= 3) ? tags[level] : "???";
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+    fprintf(stderr, "[%02d:%02d:%02d.%03ld %s] %s\n",
+            tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000,
+            tag, msg);
+}
 
 static void on_state(poc_ctx_t *ctx, poc_state_t state, void *ud)
 {
@@ -221,33 +237,50 @@ static void process_stdin(poc_ctx_t *ctx)
 
 int main(int argc, char **argv)
 {
-    if (argc < 4) {
-        fprintf(stderr, "Usage: %s <server[:port]> <account> <password> [group_id]\n", argv[0]);
+    /* Parse flags */
+    int opt;
+    while ((opt = getopt(argc, argv, "vq")) != -1) {
+        switch (opt) {
+        case 'v': g_log_level = POC_LOG_DEBUG; break;
+        case 'q': g_log_level = POC_LOG_ERROR; break;
+        }
+    }
+
+    if (argc - optind < 3) {
+        fprintf(stderr, "Usage: %s [-v|-q] <server[:port]> <account> <password> [group_id]\n", argv[0]);
+        fprintf(stderr, "\nFlags:\n");
+        fprintf(stderr, "  -v               Verbose (debug logging)\n");
+        fprintf(stderr, "  -q               Quiet (errors only)\n");
         fprintf(stderr, "\nCommands once connected:\n");
         fprintf(stderr, "  ptt              Send 1s tone via PTT\n");
         fprintf(stderr, "  msg <text>       Send group message\n");
         fprintf(stderr, "  dm <id> <text>   Send private message\n");
+        fprintf(stderr, "  sos              Send SOS alert\n");
         fprintf(stderr, "  state            Show connection state\n");
         fprintf(stderr, "  quit             Disconnect\n");
         return 1;
     }
+
+    /* Register logging callback before anything else */
+    poc_set_log_callback(cli_log, NULL);
+    poc_set_log_level(g_log_level);
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
     char host[256];
     uint16_t port = 29999;
-    snprintf(host, sizeof(host), "%s", argv[1]);
+    snprintf(host, sizeof(host), "%s", argv[optind]);
     char *colon = strchr(host, ':');
     if (colon) { *colon = '\0'; port = atoi(colon + 1); }
 
-    if (argc > 4) g_group_id = atoi(argv[4]);
+    if (argc - optind > 3) g_group_id = atoi(argv[optind + 3]);
 
     poc_config_t cfg = {
         .server_host = host,
         .server_port = port,
-        .account = argv[2],
-        .password = argv[3],
+        .account = argv[optind + 1],
+        .password = argv[optind + 2],
         .codec = POC_CODEC_SPEEX,
     };
 
@@ -270,7 +303,7 @@ int main(int argc, char **argv)
     g_ctx = poc_create(&cfg, &cb);
     if (!g_ctx) { fprintf(stderr, "Failed to create context\n"); return 1; }
 
-    printf("Connecting to %s:%u as %s...\n", host, port, argv[2]);
+    printf("Connecting to %s:%u as %s...\n", host, port, argv[optind + 1]);
     int rc = poc_connect(g_ctx);
     if (rc != POC_OK) {
         fprintf(stderr, "Connect failed: %d\n", rc);

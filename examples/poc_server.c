@@ -126,6 +126,7 @@ typedef struct {
 } server_t;
 
 static volatile int g_running = 1;
+static int g_log_level = 2; /* 0=ERR, 1=WRN, 2=INF, 3=DBG */
 static void handle_sig(int s) { (void)s; g_running = 0; }
 
 /* ── Helpers ────────────────────────────────────────────────────── */
@@ -152,20 +153,29 @@ static uint32_t rd32(const uint8_t *p) { return ((uint32_t)p[0]<<24)|((uint32_t)
 static void wr16(uint8_t *p, uint16_t v) { p[0] = v>>8; p[1] = v; }
 static void wr32(uint8_t *p, uint32_t v) { p[0] = v>>24; p[1] = v>>16; p[2] = v>>8; p[3] = v; }
 
-static void slog(const char *fmt, ...)
+static void slog_at(int level, const char *fmt, ...)
 {
+    if (level > g_log_level) return;
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     struct tm tm;
     localtime_r(&ts.tv_sec, &tm);
-    fprintf(stderr, "[srv %02d:%02d:%02d.%03ld] ",
-            tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+    static const char *tags[] = {"ERR", "WRN", "INF", "DBG"};
+    const char *tag = (level >= 0 && level <= 3) ? tags[level] : "???";
+    fprintf(stderr, "[srv %02d:%02d:%02d.%03ld %s] ",
+            tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000, tag);
     va_list ap;
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
 }
+
+/* Convenience macros */
+#define slog_err(...)  slog_at(0, __VA_ARGS__)
+#define slog_warn(...) slog_at(1, __VA_ARGS__)
+#define slog(...)      slog_at(2, __VA_ARGS__)
+#define slog_dbg(...)  slog_at(3, __VA_ARGS__)
 
 /* ── INI parser ─────────────────────────────────────────────────── */
 
@@ -332,7 +342,7 @@ static void handle_login(server_t *srv, client_t *cl, const uint8_t *data, int l
 
     user_def_t *user = find_user(srv, account);
     if (!user) {
-        slog("login: unknown account '%s'", account);
+        slog_err("login: unknown account '%s'", account);
         /* Send login error */
         uint8_t err[4] = {0, CMD_LOGIN, 0x06};
         tcp_send_frame(cl->fd, err, 3);
@@ -373,7 +383,7 @@ static void handle_login(server_t *srv, client_t *cl, const uint8_t *data, int l
 static void handle_validate(server_t *srv, client_t *cl, const uint8_t *data, int len)
 {
     if (len < 26 || cl->state != CLIENT_CHALLENGED) {
-        slog("validate: bad state or short message");
+        slog_err("validate: bad state or short message");
         return;
     }
 
@@ -383,7 +393,7 @@ static void handle_validate(server_t *srv, client_t *cl, const uint8_t *data, in
     const uint8_t *client_hmac = data + 6; /* 20 bytes */
 
     user_def_t *user = find_user(srv, cl->account);
-    if (!user) { slog("validate: user gone"); return; }
+    if (!user) { slog_err("validate: user gone"); return; }
 
     /* Compute expected HMAC: HMAC-SHA1(sha1_hex_password, nonce) */
     uint8_t nonce_buf[4];
@@ -392,7 +402,7 @@ static void handle_validate(server_t *srv, client_t *cl, const uint8_t *data, in
     hmac_sha1((const uint8_t *)user->password_sha1, 40, nonce_buf, 4, expected);
 
     if (memcmp(client_hmac, expected, 20) != 0) {
-        slog("validate: HMAC mismatch for '%s'", cl->account);
+        slog_err("validate: HMAC mismatch for '%s'", cl->account);
         /* Send validate error */
         uint8_t err[4] = {session, CMD_LOGIN, 0x01};
         tcp_send_frame(cl->fd, err, 3);
@@ -485,7 +495,7 @@ static void handle_start_ptt(server_t *srv, client_t *cl, const uint8_t *data __
 
     /* Check floor */
     if (srv->floor_holder[gidx] >= 0 && srv->floor_holder[gidx] != (int)(cl - srv->clients)) {
-        slog("ptt: floor busy for group %u, denying '%s'", cl->active_group, cl->account);
+        slog_dbg("ptt: floor busy for group %u, denying '%s'", cl->active_group, cl->account);
         /* Send PTT denied (response with non-zero) */
         uint8_t resp[8];
         resp[0] = cl->session_id;
@@ -569,7 +579,7 @@ static void handle_ext_data(server_t *srv, client_t *cl, const uint8_t *data, in
         if (target)
             tcp_send_frame(target->fd, relay, off);
         else
-            slog("msg: target user %u not online", target_id);
+            slog_warn("msg: target user %u not online", target_id);
     }
 }
 
@@ -630,7 +640,7 @@ static void handle_message(server_t *srv, client_t *cl, const uint8_t *data, int
         handle_ext_data(srv, cl, data, len);
         break;
     default:
-        slog("unhandled cmd=0x%02x from '%s' len=%d", cmd, cl->account, len);
+        slog_dbg("unhandled cmd=0x%02x from '%s' len=%d", cmd, cl->account, len);
         break;
     }
 }
@@ -652,7 +662,7 @@ static int tcp_recv_deframe(server_t *srv, client_t *cl)
 
     while (remaining >= MS_HDR_LEN + 1) {
         if (buf[0] != MS_MAGIC_0 || buf[1] != MS_MAGIC_1) {
-            slog("bad magic from '%s', resetting", cl->account);
+            slog_err("bad magic from '%s', resetting", cl->account);
             remaining = 0;
             break;
         }
@@ -759,7 +769,17 @@ static void handle_udp(server_t *srv)
 
 int main(int argc, char **argv)
 {
-    const char *config_path = (argc > 1) ? argv[1] : "poc_server.conf.ini";
+    const char *config_path = NULL;
+
+    /* Parse flags */
+    int opt;
+    while ((opt = getopt(argc, argv, "vq")) != -1) {
+        switch (opt) {
+        case 'v': g_log_level = 3; break;
+        case 'q': g_log_level = 0; break;
+        }
+    }
+    config_path = (optind < argc) ? argv[optind] : "poc_server.conf.ini";
 
     signal(SIGINT, handle_sig);
     signal(SIGTERM, handle_sig);
@@ -775,8 +795,8 @@ int main(int argc, char **argv)
 
     /* TCP listener */
     srv.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    setsockopt(srv.listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    int reuse = 1;
+    setsockopt(srv.listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
@@ -843,7 +863,7 @@ int main(int argc, char **argv)
                 slog("accept: fd=%d from %s:%d", cfd, ip, ntohs(caddr.sin_port));
             } else if (cfd >= 0) {
                 close(cfd);
-                slog("accept: max clients reached, rejecting");
+                slog_warn("accept: max clients reached, rejecting");
             }
         }
 
