@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <time.h>
+#include <stdarg.h>
 #include <math.h>
 #include <poll.h>
 
@@ -21,6 +22,20 @@ static volatile int running = 1;
 static poc_ctx_t *g_ctx = NULL;
 static uint32_t g_group_id = 0;
 static int g_log_level = POC_LOG_INFO;
+static struct linenoiseState *g_ls = NULL;  /* for async output */
+
+/* Print a line safely without corrupting linenoise prompt */
+static void async_printf(const char *fmt, ...)
+    __attribute__((format(printf, 1, 2)));
+static void async_printf(const char *fmt, ...)
+{
+    if (g_ls) linenoiseHide(g_ls);
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    if (g_ls) linenoiseShow(g_ls);
+}
 
 static void on_signal(int sig) { (void)sig; running = 0; }
 
@@ -35,9 +50,11 @@ static void cli_log(int level, const char *msg, void *ud)
     clock_gettime(CLOCK_REALTIME, &ts);
     struct tm tm;
     localtime_r(&ts.tv_sec, &tm);
-    fprintf(stderr, "\r[%02d:%02d:%02d.%03ld %s] %s\n",
+    if (g_ls) linenoiseHide(g_ls);
+    fprintf(stderr, "[%02d:%02d:%02d.%03ld %s] %s\n",
             tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000,
             tag, msg);
+    if (g_ls) linenoiseShow(g_ls);
 }
 
 /* ── Tab completion ─────────────────────────────────────────────── */
@@ -61,21 +78,21 @@ static void on_state(poc_ctx_t *ctx, poc_state_t state, void *ud)
 {
     (void)ud;
     const char *names[] = {"OFFLINE", "CONNECTING", "ONLINE", "LOGOUT"};
-    printf("\r>>> STATE: %s\n", names[state]);
+    async_printf(">>> STATE: %s\n", names[state]);
     if (state == POC_STATE_ONLINE && g_group_id > 0) {
-        printf(">>> Entering group %u\n", g_group_id);
+        async_printf(">>> Entering group %u\n", g_group_id);
         poc_enter_group(ctx, g_group_id);
     }
     if (state == POC_STATE_ONLINE)
-        printf(">>> Type 'help' for commands\n");
+        async_printf(">>> Type 'help' for commands\n");
     if (state == POC_STATE_CONNECTING)
-        printf(">>> Reconnecting...\n");
+        async_printf(">>> Reconnecting...\n");
 }
 
 static void on_login_error(poc_ctx_t *ctx, int code, const char *msg, void *ud)
 {
     (void)ctx; (void)ud;
-    printf("\r>>> LOGIN ERROR: %d — %s\n", code, msg);
+    async_printf(">>> LOGIN ERROR: %d — %s\n", code, msg);
     running = 0;
 }
 
@@ -83,13 +100,13 @@ static void on_ptt_start(poc_ctx_t *ctx, uint32_t speaker, const char *name,
                          uint32_t gid, void *ud)
 {
     (void)ctx; (void)ud;
-    printf("\r>>> PTT START: user=%u name='%s' group=%u\n", speaker, name, gid);
+    async_printf(">>> PTT START: user=%u name='%s' group=%u\n", speaker, name, gid);
 }
 
 static void on_ptt_end(poc_ctx_t *ctx, uint32_t speaker, uint32_t gid, void *ud)
 {
     (void)ctx; (void)ud;
-    printf("\r>>> PTT END: user=%u group=%u\n", speaker, gid);
+    async_printf(">>> PTT END: user=%u group=%u\n", speaker, gid);
 }
 
 static void on_audio(poc_ctx_t *ctx, const poc_audio_frame_t *frame, void *ud)
@@ -97,56 +114,56 @@ static void on_audio(poc_ctx_t *ctx, const poc_audio_frame_t *frame, void *ud)
     (void)ctx; (void)ud;
     static int frame_count = 0;
     if (++frame_count % 50 == 0)
-        printf("\r>>> AUDIO: %d frames from user %u\n", frame_count, frame->speaker_id);
+        async_printf(">>> AUDIO: %d frames from user %u\n", frame_count, frame->speaker_id);
 }
 
 static void on_ptt_granted(poc_ctx_t *ctx, bool granted, void *ud)
 {
     (void)ctx; (void)ud;
-    printf("\r>>> PTT %s\n", granted ? "GRANTED" : "DENIED");
+    async_printf(">>> PTT %s\n", granted ? "GRANTED" : "DENIED");
 }
 
 static void on_message(poc_ctx_t *ctx, uint32_t from_id, const char *text, void *ud)
 {
     (void)ctx; (void)ud;
-    printf("\r>>> MESSAGE from user %u: %s\n", from_id, text);
+    async_printf(">>> MESSAGE from user %u: %s\n", from_id, text);
 }
 
 static void on_groups(poc_ctx_t *ctx, const poc_group_t *groups, int count, void *ud)
 {
     (void)ctx; (void)ud;
-    printf("\r>>> GROUPS (%d):\n", count);
+    async_printf(">>> GROUPS (%d):\n", count);
     for (int i = 0; i < count; i++)
-        printf("    [%u] %s\n", groups[i].id, groups[i].name);
+        async_printf("    [%u] %s\n", groups[i].id, groups[i].name);
 }
 
 static void on_user_status(poc_ctx_t *ctx, uint32_t user_id, int status, void *ud)
 {
     (void)ctx; (void)ud;
     if (status == -1)
-        printf("\r>>> USER REMOVED: %u\n", user_id);
+        async_printf(">>> USER REMOVED: %u\n", user_id);
     else
-        printf("\r>>> USER %u is now %s\n", user_id, status ? "ONLINE" : "OFFLINE");
+        async_printf(">>> USER %u is now %s\n", user_id, status ? "ONLINE" : "OFFLINE");
 }
 
 static void on_pull(poc_ctx_t *ctx, uint32_t group_id, void *ud)
 {
     (void)ctx; (void)ud;
-    printf("\r>>> PULLED TO GROUP %u\n", group_id);
+    async_printf(">>> PULLED TO GROUP %u\n", group_id);
     g_group_id = group_id;
 }
 
 static void on_tmp_invite(poc_ctx_t *ctx, uint32_t group_id, uint32_t inviter, void *ud)
 {
     (void)ctx; (void)ud;
-    printf("\r>>> TEMP GROUP INVITE: group=%u from user=%u\n", group_id, inviter);
+    async_printf(">>> TEMP GROUP INVITE: group=%u from user=%u\n", group_id, inviter);
 }
 
 static void on_voice_msg(poc_ctx_t *ctx, uint32_t from, uint64_t note_id,
                          const char *desc, void *ud)
 {
     (void)ctx; (void)ud;
-    printf("\r>>> VOICE MESSAGE from %u: note=%llu desc=%s\n",
+    async_printf(">>> VOICE MESSAGE from %u: note=%llu desc=%s\n",
            from, (unsigned long long)note_id, desc);
 }
 
@@ -154,7 +171,7 @@ static void on_sos_alert(poc_ctx_t *ctx, uint32_t user_id, int type, void *ud)
 {
     (void)ctx; (void)ud;
     const char *names[] = {"SOS", "ManDown", "Fall", "CallAlarm"};
-    printf("\r>>> EMERGENCY: user=%u type=%s\n", user_id,
+    async_printf(">>> EMERGENCY: user=%u type=%s\n", user_id,
            type < 4 ? names[type] : "unknown");
 }
 
@@ -330,6 +347,7 @@ int main(int argc, char **argv)
 
     char lnbuf[512];
     struct linenoiseState ls;
+    g_ls = &ls;
     linenoiseEditStart(&ls, STDIN_FILENO, STDOUT_FILENO, lnbuf, sizeof(lnbuf), "poc> ");
 
     while (running) {
@@ -362,6 +380,7 @@ int main(int argc, char **argv)
     }
 
     linenoiseEditStop(&ls);
+    g_ls = NULL;
     printf("\nDisconnecting...\n");
     poc_destroy(g_ctx);
     return 0;
