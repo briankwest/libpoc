@@ -554,6 +554,35 @@ static void handle_end_ptt(server_t *srv, client_t *cl, const uint8_t *data __at
 
 static void handle_ext_data(server_t *srv, client_t *cl, const uint8_t *data, int len)
 {
+    if (len < 7) return;
+
+    /* Check for SOS marker (0xFF at byte 6) or cancel (0xFE) */
+    uint8_t marker = data[6];
+    if (marker == 0xFF || marker == 0xFE) {
+        int alert_type = (len > 7) ? data[7] : 0;
+        const char *alert_names[] = {"SOS", "ManDown", "Fall", "CallAlarm"};
+        const char *aname = (alert_type < 4) ? alert_names[alert_type] : "unknown";
+
+        if (marker == 0xFF) {
+            slog("*** SOS from '%s' (user %u): %s ***", cl->account, cl->user_id, aname);
+            /* Broadcast SOS to all online clients */
+            uint8_t relay[16];
+            int off = 0;
+            relay[off++] = 0;
+            relay[off++] = CMD_EXT_DATA;
+            wr32(relay + off, cl->user_id); off += 4;
+            relay[off++] = 0xFF;
+            relay[off++] = (uint8_t)alert_type;
+            for (int i = 0; i < srv->client_count; i++)
+                if (srv->clients[i].state == CLIENT_ONLINE && srv->clients[i].fd != cl->fd)
+                    tcp_send_frame(srv->clients[i].fd, relay, off);
+        } else {
+            slog("SOS cancel from '%s' (user %u)", cl->account, cl->user_id);
+        }
+        return;
+    }
+
+    /* Regular message: need target_id + text */
     if (len < 10) return;
     uint32_t target_id = rd32(data + 6);
     const char *text = (const char *)(data + 10);

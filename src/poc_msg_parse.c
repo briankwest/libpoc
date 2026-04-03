@@ -545,9 +545,23 @@ static void handle_ext_data(poc_ctx_t *ctx, const uint8_t *data, int len)
     if (len < 5) return;
 
     uint32_t from_id = poc_read32(data);
-    const char *text = (const char *)(data + 4);
 
-    /* Ensure null-termination within bounds */
+    /* Check for SOS marker (0xFF) or cancel (0xFE) at byte 4 */
+    if (len >= 5 && ((uint8_t)data[4] == 0xFF || (uint8_t)data[4] == 0xFE)) {
+        if ((uint8_t)data[4] == 0xFF) {
+            int alert_type = (len >= 6) ? data[5] : 0;
+            poc_log("SOS: from user %u, type=%d", from_id, alert_type);
+            poc_event_t evt = { .type = POC_EVT_SOS,
+                                .sos = { .user_id = from_id, .alert_type = alert_type }};
+            poc_evt_push(&ctx->evt_queue, &evt);
+        } else {
+            poc_log("SOS cancel: from user %u", from_id);
+        }
+        return;
+    }
+
+    /* Regular text message */
+    const char *text = (const char *)(data + 4);
     int text_max = len - 4;
     bool terminated = false;
     for (int i = 0; i < text_max; i++) {
