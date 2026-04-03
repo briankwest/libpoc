@@ -219,6 +219,9 @@ static void *io_thread_fn(void *arg)
             break;
         }
 
+        /* Check if we should stop (sockets may have been closed under us) */
+        if (!atomic_load(&ctx->io_running)) break;
+
         /* Drain wakeup pipe */
         if (fds[0].revents & POLLIN) {
             char tmp[64];
@@ -402,15 +405,19 @@ int poc_disconnect(poc_ctx_t *ctx)
 {
     if (!ctx) return POC_ERR;
 
-    /* Stop I/O thread */
+    /* Stop I/O thread: close sockets first to unblock any pending
+     * send/recv, then signal and join. */
     if (atomic_load(&ctx->io_running)) {
         atomic_store(&ctx->io_running, false);
+        /* Close sockets to break any blocking send/recv in the I/O thread */
+        poc_tcp_close(ctx);
+        poc_udp_close(ctx);
         io_wakeup(ctx);
         pthread_join(ctx->io_thread, NULL);
+    } else {
+        poc_tcp_close(ctx);
+        poc_udp_close(ctx);
     }
-
-    poc_tcp_close(ctx);
-    poc_udp_close(ctx);
 
     if (ctx->io_wakeup[0] >= 0) { close(ctx->io_wakeup[0]); ctx->io_wakeup[0] = -1; }
     if (ctx->io_wakeup[1] >= 0) { close(ctx->io_wakeup[1]); ctx->io_wakeup[1] = -1; }

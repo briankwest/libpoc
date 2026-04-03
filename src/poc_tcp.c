@@ -95,15 +95,19 @@ int poc_tcp_send_frame(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len)
     memcpy(frame + MS_HDR_LEN, payload, len);
 
     int sent = 0;
+    int retries = 0;
     while (sent < total) {
         int n = send(ctx->tcp_fd, frame + sent, total - sent, MSG_NOSIGNAL);
         if (n < 0) {
-            if (errno == EAGAIN || errno == EINTR)
+            if ((errno == EAGAIN || errno == EINTR) && retries++ < 50) {
+                usleep(1000); /* 1ms backoff, max 50ms total */
                 continue;
+            }
             poc_log_at(POC_LOG_ERROR, "tcp: send error: %s", strerror(errno));
             return POC_ERR_NETWORK;
         }
         sent += n;
+        retries = 0;
     }
 
     return POC_OK;
