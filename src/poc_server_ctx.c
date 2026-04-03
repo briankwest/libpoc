@@ -426,6 +426,44 @@ static void srv_dispatch(poc_server_t *srv, int cl_idx, const uint8_t *data, int
     case POC_CMD_MOD_STATUS:
         if (len >= 7) srv_status_broadcast(srv, cl->user_id, data[6], cl->fd);
         break;
+
+    /* Temp groups */
+    case POC_CMD_INVITE_TMP:
+        if (len >= 10) {
+            poc_log_at(POC_LOG_INFO, "srv: '%s' inviting users to temp group", cl->account);
+            int off = 6;
+            while (off + 4 <= len) {
+                uint32_t uid = poc_read32(data + off); off += 4;
+                srv_client_t *t = srv_find_client(srv, uid);
+                if (t) {
+                    uint8_t notify[12];
+                    int noff = 0;
+                    notify[noff++] = 0; notify[noff++] = POC_NOTIFY_INVITE_TMP;
+                    poc_write32(notify + noff, cl->active_group); noff += 4;
+                    poc_write32(notify + noff, cl->user_id); noff += 4;
+                    srv_send_frame(t->fd, notify, noff);
+                }
+            }
+        }
+        break;
+    case POC_CMD_ENTER_TMP:
+        if (len >= 10) {
+            uint32_t gid = poc_read32(data + 6);
+            cl->active_group = gid;
+            poc_log_at(POC_LOG_INFO, "srv: '%s' entered temp group %u", cl->account, gid);
+        }
+        break;
+    case POC_CMD_REJECT_TMP:
+        poc_log_at(POC_LOG_INFO, "srv: '%s' rejected temp group invite", cl->account);
+        break;
+
+    /* Voice messages */
+    case POC_CMD_NOTE_INCOME:
+    case POC_CMD_VOICE_INCOME:
+    case POC_CMD_VOICE_MESSAGE:
+        poc_log_at(POC_LOG_INFO, "srv: voice msg from '%s' cmd=0x%02x len=%d", cl->account, cmd, len);
+        break;
+
     default:
         poc_log_at(POC_LOG_DEBUG, "srv: unhandled cmd=0x%02x from '%s'", cmd, cl->account);
         break;
