@@ -164,7 +164,10 @@ static void srv_handle_login(poc_server_t *srv, srv_client_t *cl, const uint8_t 
 
 static void srv_handle_validate(poc_server_t *srv, srv_client_t *cl, const uint8_t *data, int len)
 {
-    if (len < 26 || cl->state != SRV_CLIENT_CHALLENGED) return;
+    if (len < 26 || cl->state != SRV_CLIENT_CHALLENGED) {
+        poc_log_at(POC_LOG_WARNING, "srv: validate rejected: len=%d state=%d (need len>=26 state=CHALLENGED)", len, cl->state);
+        return;
+    }
     uint8_t session = data[0];
     const uint8_t *client_hmac = data + 6;
 
@@ -398,6 +401,8 @@ static void srv_dispatch(poc_server_t *srv, int cl_idx, const uint8_t *data, int
     if (len < 6) return;
     srv_client_t *cl = &srv->clients[cl_idx];
     uint8_t cmd = data[5]; /* client→server format: cmd at offset 5 */
+    poc_log_at(POC_LOG_DEBUG, "srv: dispatch cmd=0x%02x len=%d from '%s' state=%d",
+               cmd, len, cl->account, cl->state);
 
     switch (cmd) {
     case POC_CMD_LOGIN:       srv_handle_login(srv, cl, data, len); break;
