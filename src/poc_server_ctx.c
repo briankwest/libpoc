@@ -19,6 +19,8 @@
 #include <arpa/inet.h>
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 /* ── Helpers ────────────────────────────────────────────────────── */
 
@@ -30,7 +32,7 @@ static void srv_sha1_hex(const char *input, char *hex)
     hex[40] = '\0';
 }
 
-static int srv_send_frame(int fd, const uint8_t *payload, uint16_t len)
+static int srv_send_frame_ssl(int fd, SSL *ssl, const uint8_t *payload, uint16_t len)
 {
     uint8_t frame[POC_MS_HDR_LEN + 65535];
     frame[0] = POC_MS_MAGIC_0;
@@ -39,11 +41,23 @@ static int srv_send_frame(int fd, const uint8_t *payload, uint16_t len)
     memcpy(frame + POC_MS_HDR_LEN, payload, len);
     int total = POC_MS_HDR_LEN + len, sent = 0;
     while (sent < total) {
-        int n = send(fd, frame + sent, total - sent, MSG_NOSIGNAL);
-        if (n <= 0) return POC_ERR_NETWORK;
+        int n;
+        if (ssl) {
+            n = SSL_write(ssl, frame + sent, total - sent);
+            if (n <= 0) return POC_ERR_NETWORK;
+        } else {
+            n = send(fd, frame + sent, total - sent, MSG_NOSIGNAL);
+            if (n <= 0) return POC_ERR_NETWORK;
+        }
         sent += n;
     }
     return POC_OK;
+}
+
+/* Convenience: send to a client */
+static int srv_send_frame(srv_client_t *cl, const uint8_t *payload, uint16_t len)
+{
+    return srv_send_frame_ssl(cl->fd, cl->ssl, payload, len);
 }
 
 static void srv_broadcast_group(poc_server_t *srv, uint32_t group_id,
@@ -52,7 +66,7 @@ static void srv_broadcast_group(poc_server_t *srv, uint32_t group_id,
     for (int i = 0; i < srv->client_count; i++) {
         srv_client_t *c = &srv->clients[i];
         if (c->state == SRV_CLIENT_ONLINE && c->active_group == group_id && c->fd != exclude_fd)
-            srv_send_frame(c->fd, payload, len);
+            srv_send_frame(c, payload, len);
     }
 }
 
@@ -60,7 +74,7 @@ static void srv_broadcast_all(poc_server_t *srv, const uint8_t *payload, uint16_
 {
     for (int i = 0; i < srv->client_count; i++)
         if (srv->clients[i].state == SRV_CLIENT_ONLINE && srv->clients[i].fd != exclude_fd)
-            srv_send_frame(srv->clients[i].fd, payload, len);
+            srv_send_frame(&srv->clients[i], payload, len);
 }
 
 static srv_user_t *srv_find_user(poc_server_t *srv, const char *account)
@@ -124,6 +138,7 @@ static void srv_disconnect(poc_server_t *srv, int idx)
         poc_evt_push(&srv->evt_queue, &evt);
     }
 
+    if (cl->ssl) { SSL_shutdown(cl->ssl); SSL_free(cl->ssl); cl->ssl = NULL; }
     close(cl->fd);
     srv->client_count--;
     if (idx < srv->client_count) {
@@ -148,7 +163,7 @@ static void srv_handle_login(poc_server_t *srv, srv_client_t *cl, const uint8_t 
     if (!user) {
         poc_log_at(POC_LOG_WARNING, "srv: login rejected — unknown account '%s'", account);
         uint8_t err[4] = { cl->session_id, POC_NOTIFY_RESPONSE, 0x06 };
-        srv_send_frame(cl->fd, err, 3);
+        srv_send_frame(cl, err, 3);
         return;
     }
 
@@ -168,7 +183,7 @@ static void srv_handle_login(poc_server_t *srv, srv_client_t *cl, const uint8_t 
     poc_write16(resp + off, 0); off += 2; /* key_type */
     resp[off++] = 0; /* gps_flag */
 
-    srv_send_frame(cl->fd, resp, off);
+    srv_send_frame(cl, resp, off);
     poc_log_at(POC_LOG_INFO, "srv: %s: sent auth challenge (user %u)", account, cl->user_id);
 }
 
@@ -191,7 +206,7 @@ static void srv_handle_validate(poc_server_t *srv, srv_client_t *cl, const uint8
     if (memcmp(client_hmac, expected, 20) != 0) {
         poc_log_at(POC_LOG_WARNING, "srv: %s: authentication failed (bad password)", cl->account);
         uint8_t err[4] = { session, POC_NOTIFY_RESPONSE, 0x01 };
-        srv_send_frame(cl->fd, err, 3);
+        srv_send_frame(cl, err, 3);
         return;
     }
 
@@ -228,7 +243,7 @@ static void srv_handle_validate(poc_server_t *srv, srv_client_t *cl, const uint8
         resp[off++] = nlen;
         memcpy(resp + off, g->name, nlen); off += nlen;
     }
-    srv_send_frame(cl->fd, resp, off);
+    srv_send_frame(cl, resp, off);
 
     /* Push connect event */
     poc_event_t evt = { .type = POC_EVT_USER_STATUS,
@@ -241,7 +256,7 @@ static void srv_handle_heartbeat(poc_server_t *srv, srv_client_t *cl)
     (void)srv;
     cl->last_heartbeat = poc_mono_ms();
     uint8_t resp[2] = { cl->session_id, POC_NOTIFY_HEARTBEAT };
-    srv_send_frame(cl->fd, resp, 2);
+    srv_send_frame(cl, resp, 2);
 }
 
 static void srv_handle_enter_group(poc_server_t *srv, srv_client_t *cl, const uint8_t *data, int len)
@@ -279,7 +294,7 @@ static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx
 
     /* Respond */
     uint8_t resp[4] = { cl->session_id, POC_NOTIFY_RESPONSE, grant ? 0 : 0x25 };
-    srv_send_frame(cl->fd, resp, 3);
+    srv_send_frame(cl, resp, 3);
 
     if (grant) {
         srv->groups[gidx].floor_holder = cl_idx;
@@ -361,15 +376,15 @@ static void srv_handle_ext_data(poc_server_t *srv, srv_client_t *cl, const uint8
     } else {
         srv_client_t *target = srv_find_client(srv, target_id);
         if (target) {
-            srv_send_frame(target->fd, relay, off);
+            srv_send_frame(target, relay, off);
             /* Send delivery ACK to sender */
             uint8_t ack[4] = { cl->session_id, POC_NOTIFY_PKG_ACK, 0x00 };
-            srv_send_frame(cl->fd, ack, 3);
+            srv_send_frame(cl, ack, 3);
         } else {
             /* Target not online — notify sender */
             poc_log_at(POC_LOG_INFO, "srv: user %u offline — notifying %s", target_id, cl->account);
             uint8_t nack[4] = { cl->session_id, POC_NOTIFY_RESPONSE, 0x25 }; /* 0x25 = target unavailable */
-            srv_send_frame(cl->fd, nack, 3);
+            srv_send_frame(cl, nack, 3);
         }
     }
 
@@ -386,7 +401,7 @@ static void srv_handle_force_exit(poc_server_t *srv, srv_client_t *cl, const uin
             if (srv->clients[i].user_id == uid && srv->clients[i].state == SRV_CLIENT_ONLINE) {
                 poc_log_at(POC_LOG_WARNING, "srv: %s stunned user %u — forced offline", cl->account, uid);
                 uint8_t msg[4] = { 0, POC_NOTIFY_FORCE_EXIT };
-                srv_send_frame(srv->clients[i].fd, msg, 2);
+                srv_send_frame(&srv->clients[i], msg, 2);
                 srv_disconnect(srv, i);
                 break;
             }
@@ -406,7 +421,7 @@ static void srv_handle_pull(poc_server_t *srv, srv_client_t *cl, const uint8_t *
             int noff = 0;
             notify[noff++] = 0; notify[noff++] = POC_NOTIFY_PULL_TO_GROUP;
             poc_write32(notify + noff, cl->active_group); noff += 4;
-            srv_send_frame(t->fd, notify, noff);
+            srv_send_frame(t, notify, noff);
             poc_log_at(POC_LOG_INFO, "srv: %s pulled user %u into group %u", cl->account, uid, cl->active_group);
         }
     }
@@ -463,7 +478,7 @@ static void srv_dispatch(poc_server_t *srv, int cl_idx, const uint8_t *data, int
                     notify[noff++] = 0; notify[noff++] = POC_NOTIFY_INVITE_TMP;
                     poc_write32(notify + noff, cl->active_group); noff += 4;
                     poc_write32(notify + noff, cl->user_id); noff += 4;
-                    srv_send_frame(t->fd, notify, noff);
+                    srv_send_frame(t, notify, noff);
                 }
             }
         }
@@ -500,8 +515,18 @@ static int srv_tcp_recv(poc_server_t *srv, int cl_idx)
     int space = SRV_RECV_BUF - cl->recv_len;
     if (space <= 0) { cl->recv_len = 0; return -1; }
 
-    int n = recv(cl->fd, cl->recv_buf + cl->recv_len, space, 0);
-    if (n <= 0) return -1;
+    int n;
+    if (cl->ssl) {
+        n = SSL_read(cl->ssl, cl->recv_buf + cl->recv_len, space);
+        if (n <= 0) {
+            int err = SSL_get_error(cl->ssl, n);
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return 0;
+            return -1;
+        }
+    } else {
+        n = recv(cl->fd, cl->recv_buf + cl->recv_len, space, 0);
+        if (n <= 0) return -1;
+    }
     cl->recv_len += n;
 
     uint8_t *buf = cl->recv_buf;
@@ -541,12 +566,28 @@ static void srv_handle_udp(poc_server_t *srv)
     }
     if (!sender || !sender->active_group) return;
 
+    /* Relay raw packet to other clients in the group */
     for (int i = 0; i < srv->client_count; i++) {
         srv_client_t *c = &srv->clients[i];
         if (c == sender || c->state != SRV_CLIENT_ONLINE) continue;
         if (c->active_group != sender->active_group) continue;
         if (!c->has_udp_addr) continue;
         sendto(srv->udp_fd, pkt, n, 0, (struct sockaddr *)&c->udp_addr, sizeof(c->udp_addr));
+    }
+
+    /* Decode audio and push event for on_audio callback */
+    if (srv->cb.on_audio && n > POC_UDP_HDR_LEN) {
+        const uint8_t *encoded = pkt + POC_UDP_HDR_LEN;
+        int enc_len = n - POC_UDP_HDR_LEN;
+        int16_t pcm[160];
+        int decoded = poc_speex_decode(&srv->speex, encoded, enc_len, pcm);
+        if (decoded > 0) {
+            poc_event_t evt = { .type = POC_EVT_AUDIO };
+            evt.audio.speaker_id = sender_id;
+            evt.audio.group_id = sender->active_group;
+            memcpy(evt.audio.pcm, pcm, decoded * sizeof(int16_t));
+            poc_evt_push(&srv->evt_queue, &evt);
+        }
     }
 }
 
@@ -588,12 +629,41 @@ static void *srv_io_thread(void *arg)
             if (cfd >= 0 && srv->client_count < srv->max_clients) {
                 int fl = fcntl(cfd, F_GETFL, 0);
                 fcntl(cfd, F_SETFL, fl | O_NONBLOCK);
+
+                /* TLS handshake if enabled */
+                SSL *client_ssl = NULL;
+                if (srv->tls_enabled && srv->ssl_ctx) {
+                    client_ssl = SSL_new(srv->ssl_ctx);
+                    SSL_set_fd(client_ssl, cfd);
+                    /* Non-blocking accept — retry up to 2s */
+                    int tls_ok = 0;
+                    for (int att = 0; att < 8; att++) {
+                        int ret = SSL_accept(client_ssl);
+                        if (ret == 1) { tls_ok = 1; break; }
+                        int err = SSL_get_error(client_ssl, ret);
+                        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                            struct pollfd tp = { .fd = cfd, .events = POLLIN | POLLOUT };
+                            poll(&tp, 1, 250);
+                            continue;
+                        }
+                        break;
+                    }
+                    if (!tls_ok) {
+                        poc_log_at(POC_LOG_WARNING, "srv: TLS handshake failed from %s",
+                                   inet_ntoa(ca.sin_addr));
+                        SSL_free(client_ssl);
+                        close(cfd);
+                        continue;
+                    }
+                }
+
                 srv_client_t *c = &srv->clients[srv->client_count++];
                 memset(c, 0, sizeof(*c));
                 c->fd = cfd;
+                c->ssl = client_ssl;
                 c->state = SRV_CLIENT_NEW;
-                poc_log_at(POC_LOG_INFO, "srv: new client connected from %s",
-                           inet_ntoa(ca.sin_addr));
+                poc_log_at(POC_LOG_INFO, "srv: new client connected from %s%s",
+                           inet_ntoa(ca.sin_addr), client_ssl ? " (TLS)" : "");
             } else if (cfd >= 0) {
                 close(cfd);
             }
@@ -640,6 +710,16 @@ poc_server_t *poc_server_create(const poc_server_config_t *cfg,
 
     for (int i = 0; i < SRV_MAX_GROUPS; i++) srv->groups[i].floor_holder = -1;
 
+    /* TLS config */
+    srv->tls_enabled = (cfg && cfg->tls);
+    if (cfg && cfg->tls_cert_path)
+        snprintf(srv->tls_cert_path, sizeof(srv->tls_cert_path), "%s", cfg->tls_cert_path);
+    if (cfg && cfg->tls_key_path)
+        snprintf(srv->tls_key_path, sizeof(srv->tls_key_path), "%s", cfg->tls_key_path);
+
+    /* Speex codec for audio decode/encode */
+    poc_speex_init(&srv->speex);
+
     if (cb) srv->cb = *cb;
     return srv;
 }
@@ -648,6 +728,8 @@ void poc_server_destroy(poc_server_t *srv)
 {
     if (!srv) return;
     poc_server_stop(srv);
+    poc_speex_destroy(&srv->speex);
+    if (srv->ssl_ctx) { SSL_CTX_free(srv->ssl_ctx); srv->ssl_ctx = NULL; }
     free(srv);
 }
 
@@ -702,6 +784,27 @@ int poc_server_start(poc_server_t *srv)
 {
     if (!srv) return POC_ERR;
 
+    /* TLS context */
+    if (srv->tls_enabled) {
+        srv->ssl_ctx = SSL_CTX_new(TLS_server_method());
+        if (!srv->ssl_ctx) {
+            poc_log_at(POC_LOG_ERROR, "srv: failed to create TLS context");
+            return POC_ERR;
+        }
+        SSL_CTX_set_min_proto_version(srv->ssl_ctx, TLS1_2_VERSION);
+        if (SSL_CTX_use_certificate_file(srv->ssl_ctx, srv->tls_cert_path, SSL_FILETYPE_PEM) != 1) {
+            poc_log_at(POC_LOG_ERROR, "srv: failed to load TLS cert: %s", srv->tls_cert_path);
+            SSL_CTX_free(srv->ssl_ctx); srv->ssl_ctx = NULL;
+            return POC_ERR;
+        }
+        if (SSL_CTX_use_PrivateKey_file(srv->ssl_ctx, srv->tls_key_path, SSL_FILETYPE_PEM) != 1) {
+            poc_log_at(POC_LOG_ERROR, "srv: failed to load TLS key: %s", srv->tls_key_path);
+            SSL_CTX_free(srv->ssl_ctx); srv->ssl_ctx = NULL;
+            return POC_ERR;
+        }
+        poc_log_at(POC_LOG_INFO, "srv: TLS enabled (cert=%s)", srv->tls_cert_path);
+    }
+
     /* TCP listener */
     srv->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     int reuse = 1;
@@ -739,7 +842,8 @@ int poc_server_start(poc_server_t *srv)
         return POC_ERR;
     }
 
-    poc_log_at(POC_LOG_INFO, "srv: listening on %s:%d", srv->bind_addr, srv->port);
+    poc_log_at(POC_LOG_INFO, "srv: listening on %s:%d%s", srv->bind_addr, srv->port,
+               srv->tls_enabled ? " (TLS)" : "");
     return POC_OK;
 }
 
@@ -784,10 +888,83 @@ int poc_server_poll(poc_server_t *srv, int timeout_ms)
                 srv->cb.on_client_disconnect(srv, evt.user_status.user_id, acct, srv->cb.userdata);
             }
             break;
+        case POC_EVT_AUDIO:
+            if (srv->cb.on_audio)
+                srv->cb.on_audio(srv, evt.audio.speaker_id, evt.audio.group_id,
+                                 evt.audio.pcm, 160, srv->cb.userdata);
+            break;
         default:
             break;
         }
     }
+    return POC_OK;
+}
+
+/* ── Audio injection + virtual PTT ─────────────────────────────── */
+
+int poc_server_inject_audio(poc_server_t *srv, uint32_t group_id,
+                            uint32_t virtual_user_id,
+                            const int16_t *pcm, int n_samples)
+{
+    if (!srv || !pcm || n_samples <= 0) return POC_ERR;
+
+    /* Encode PCM → Speex */
+    uint8_t encoded[SPEEX_FRAME_ENC];
+    int enc_len = poc_speex_encode(&srv->speex, pcm, encoded);
+    if (enc_len <= 0) return POC_ERR;
+
+    /* Build UDP packet: [seq(2)][sender(4)][pad(1)][type(1)][payload] */
+    uint8_t pkt[POC_UDP_HDR_LEN + SPEEX_FRAME_ENC];
+    poc_write16(pkt, srv->inject_seq++);
+    poc_write32(pkt + 2, virtual_user_id);
+    pkt[6] = 0;     /* pad */
+    pkt[7] = 0x80;  /* content type: audio */
+    memcpy(pkt + POC_UDP_HDR_LEN, encoded, enc_len);
+    int pkt_len = POC_UDP_HDR_LEN + enc_len;
+
+    /* Send to all clients in the group */
+    for (int i = 0; i < srv->client_count; i++) {
+        srv_client_t *c = &srv->clients[i];
+        if (c->state != SRV_CLIENT_ONLINE) continue;
+        if (c->active_group != group_id) continue;
+        if (!c->has_udp_addr) continue;
+        sendto(srv->udp_fd, pkt, pkt_len, 0,
+               (struct sockaddr *)&c->udp_addr, sizeof(c->udp_addr));
+    }
+    return POC_OK;
+}
+
+int poc_server_start_ptt_for(poc_server_t *srv, uint32_t group_id,
+                             uint32_t virtual_user_id, const char *name)
+{
+    if (!srv) return POC_ERR;
+    uint8_t notify[64];
+    int off = 0;
+    notify[off++] = 0;
+    notify[off++] = POC_NOTIFY_START_PTT_PRI;
+    poc_write32(notify + off, virtual_user_id); off += 4;
+    notify[off++] = 0; /* flags */
+    if (name) {
+        int nlen = strlen(name) + 1;
+        if (nlen + off < (int)sizeof(notify)) {
+            memcpy(notify + off, name, nlen);
+            off += nlen;
+        }
+    }
+    srv_broadcast_group(srv, group_id, notify, off, -1);
+    return POC_OK;
+}
+
+int poc_server_end_ptt_for(poc_server_t *srv, uint32_t group_id,
+                           uint32_t virtual_user_id)
+{
+    if (!srv) return POC_ERR;
+    uint8_t notify[8];
+    int off = 0;
+    notify[off++] = 0;
+    notify[off++] = POC_NOTIFY_END_PTT_PRI;
+    poc_write32(notify + off, virtual_user_id); off += 4;
+    srv_broadcast_group(srv, group_id, notify, off, -1);
     return POC_OK;
 }
 
@@ -807,7 +984,7 @@ int poc_server_send_message(poc_server_t *srv, uint32_t from_id,
     int gidx = srv_find_group_idx(srv, target_id);
     if (gidx >= 0) { srv_broadcast_group(srv, target_id, relay, off, -1); return POC_OK; }
     srv_client_t *t = srv_find_client(srv, target_id);
-    if (t) { srv_send_frame(t->fd, relay, off); return POC_OK; }
+    if (t) { srv_send_frame(t, relay, off); return POC_OK; }
     return POC_ERR;
 }
 
@@ -822,7 +999,7 @@ int poc_server_kick(poc_server_t *srv, uint32_t user_id)
     for (int i = 0; i < srv->client_count; i++) {
         if (srv->clients[i].user_id == user_id && srv->clients[i].state == SRV_CLIENT_ONLINE) {
             uint8_t msg[4] = { 0, POC_NOTIFY_FORCE_EXIT };
-            srv_send_frame(srv->clients[i].fd, msg, 2);
+            srv_send_frame(&srv->clients[i], msg, 2);
             srv_disconnect(srv, i);
             return POC_OK;
         }
@@ -840,7 +1017,7 @@ int poc_server_pull_to_group(poc_server_t *srv, uint32_t user_id, uint32_t group
     int off = 0;
     notify[off++] = 0; notify[off++] = POC_NOTIFY_PULL_TO_GROUP;
     poc_write32(notify + off, group_id); off += 4;
-    srv_send_frame(t->fd, notify, off);
+    srv_send_frame(t, notify, off);
     return POC_OK;
 }
 

@@ -19,6 +19,8 @@ static poc_ctx_t *make_ctx(void)
     poc_ctx_t *ctx = calloc(1, sizeof(*ctx));
     ctx->state = POC_STATE_CONNECTING;
     ctx->login_state = LOGIN_SENT_LOGIN;
+    ctx->tcp_fd = -1;
+    pthread_mutex_init(&ctx->sig_mutex, NULL);
     return ctx;
 }
 

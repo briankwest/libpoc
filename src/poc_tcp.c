@@ -13,6 +13,8 @@
 #include <string.h>
 #include <netdb.h>
 #include <poll.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 int poc_tcp_connect(poc_ctx_t *ctx)
 {
@@ -71,15 +73,78 @@ int poc_tcp_connect(poc_ctx_t *ctx)
 
     ctx->tcp_fd = fd;
     ctx->tcp_recv_len = 0;
-    poc_log("tcp: connected to %s:%u (fd=%d)", ctx->server_host, ctx->server_port, fd);
+
+    /* TLS handshake if enabled */
+    if (ctx->tls_enabled) {
+        ctx->ssl_ctx = SSL_CTX_new(TLS_client_method());
+        if (!ctx->ssl_ctx) {
+            poc_log_at(POC_LOG_ERROR, "TLS: failed to create SSL context");
+            close(fd); ctx->tcp_fd = -1;
+            return POC_ERR_NETWORK;
+        }
+        SSL_CTX_set_min_proto_version(ctx->ssl_ctx, TLS1_2_VERSION);
+
+        if (ctx->tls_ca_path[0]) {
+            if (SSL_CTX_load_verify_locations(ctx->ssl_ctx, ctx->tls_ca_path, NULL) != 1) {
+                poc_log_at(POC_LOG_ERROR, "TLS: failed to load CA cert: %s", ctx->tls_ca_path);
+                SSL_CTX_free(ctx->ssl_ctx); ctx->ssl_ctx = NULL;
+                close(fd); ctx->tcp_fd = -1;
+                return POC_ERR_NETWORK;
+            }
+        } else {
+            SSL_CTX_set_default_verify_paths(ctx->ssl_ctx);
+        }
+
+        if (ctx->tls_verify)
+            SSL_CTX_set_verify(ctx->ssl_ctx, SSL_VERIFY_PEER, NULL);
+
+        ctx->ssl = SSL_new(ctx->ssl_ctx);
+        SSL_set_fd(ctx->ssl, fd);
+
+        /* Non-blocking TLS handshake with poll */
+        int tls_ok = 0;
+        for (int attempt = 0; attempt < 40; attempt++) {  /* 40 × 250ms = 10s max */
+            int ret = SSL_connect(ctx->ssl);
+            if (ret == 1) { tls_ok = 1; break; }
+            int err = SSL_get_error(ctx->ssl, ret);
+            if (err == SSL_ERROR_WANT_READ) {
+                struct pollfd tp = { .fd = fd, .events = POLLIN };
+                poll(&tp, 1, 250);
+            } else if (err == SSL_ERROR_WANT_WRITE) {
+                struct pollfd tp = { .fd = fd, .events = POLLOUT };
+                poll(&tp, 1, 250);
+            } else {
+                poc_log_at(POC_LOG_ERROR, "TLS: handshake failed (SSL error %d)", err);
+                break;
+            }
+        }
+        if (!tls_ok) {
+            SSL_free(ctx->ssl); ctx->ssl = NULL;
+            SSL_CTX_free(ctx->ssl_ctx); ctx->ssl_ctx = NULL;
+            close(fd); ctx->tcp_fd = -1;
+            return POC_ERR_NETWORK;
+        }
+        poc_log("connected to %s:%u (TLS)", ctx->server_host, ctx->server_port);
+    } else {
+        poc_log("connected to %s:%u", ctx->server_host, ctx->server_port);
+    }
+
     return POC_OK;
 }
 
 void poc_tcp_close(poc_ctx_t *ctx)
 {
+    if (ctx->ssl) {
+        SSL_shutdown(ctx->ssl);
+        SSL_free(ctx->ssl);
+        ctx->ssl = NULL;
+    }
+    if (ctx->ssl_ctx) {
+        SSL_CTX_free(ctx->ssl_ctx);
+        ctx->ssl_ctx = NULL;
+    }
     if (ctx->tcp_fd >= 0) {
         close(ctx->tcp_fd);
-        poc_log("tcp: closed fd=%d", ctx->tcp_fd);
         ctx->tcp_fd = -1;
     }
     ctx->tcp_recv_len = 0;
@@ -104,14 +169,28 @@ int poc_tcp_send_frame(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len)
     int sent = 0;
     int retries = 0;
     while (sent < total) {
-        int n = send(ctx->tcp_fd, frame + sent, total - sent, MSG_NOSIGNAL);
-        if (n < 0) {
-            if ((errno == EAGAIN || errno == EINTR) && retries++ < 50) {
-                usleep(1000); /* 1ms backoff, max 50ms total */
-                continue;
+        int n;
+        if (ctx->ssl) {
+            n = SSL_write(ctx->ssl, frame + sent, total - sent);
+            if (n <= 0) {
+                int err = SSL_get_error(ctx->ssl, n);
+                if ((err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) && retries++ < 50) {
+                    usleep(1000);
+                    continue;
+                }
+                poc_log_at(POC_LOG_ERROR, "TLS send error (SSL error %d)", err);
+                return POC_ERR_NETWORK;
             }
-            poc_log_at(POC_LOG_ERROR, "tcp: send error: %s", strerror(errno));
-            return POC_ERR_NETWORK;
+        } else {
+            n = send(ctx->tcp_fd, frame + sent, total - sent, MSG_NOSIGNAL);
+            if (n < 0) {
+                if ((errno == EAGAIN || errno == EINTR) && retries++ < 50) {
+                    usleep(1000);
+                    continue;
+                }
+                poc_log_at(POC_LOG_ERROR, "tcp send error: %s", strerror(errno));
+                return POC_ERR_NETWORK;
+            }
         }
         sent += n;
         retries = 0;
@@ -130,16 +209,32 @@ int poc_tcp_recv(poc_ctx_t *ctx)
     if (space <= 0)
         return POC_ERR;
 
-    int n = recv(ctx->tcp_fd, ctx->tcp_recv_buf + ctx->tcp_recv_len, space, 0);
-    if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-            return POC_OK;
-        poc_log_at(POC_LOG_ERROR, "tcp: recv error: %s", strerror(errno));
-        return POC_ERR_NETWORK;
-    }
-    if (n == 0) {
-        poc_log_at(POC_LOG_WARNING, "tcp: connection closed by server");
-        return POC_ERR_NETWORK;
+    int n;
+    if (ctx->ssl) {
+        n = SSL_read(ctx->ssl, ctx->tcp_recv_buf + ctx->tcp_recv_len, space);
+        if (n <= 0) {
+            int err = SSL_get_error(ctx->ssl, n);
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+                return POC_OK;
+            if (err == SSL_ERROR_ZERO_RETURN) {
+                poc_log_at(POC_LOG_WARNING, "TLS: connection closed by server");
+                return POC_ERR_NETWORK;
+            }
+            poc_log_at(POC_LOG_ERROR, "TLS recv error (SSL error %d)", err);
+            return POC_ERR_NETWORK;
+        }
+    } else {
+        n = recv(ctx->tcp_fd, ctx->tcp_recv_buf + ctx->tcp_recv_len, space, 0);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return POC_OK;
+            poc_log_at(POC_LOG_ERROR, "tcp recv error: %s", strerror(errno));
+            return POC_ERR_NETWORK;
+        }
+        if (n == 0) {
+            poc_log_at(POC_LOG_WARNING, "connection closed by server");
+            return POC_ERR_NETWORK;
+        }
     }
 
     ctx->tcp_recv_len += n;

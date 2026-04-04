@@ -8,6 +8,7 @@
 #include "poc_server.h"
 #include "poc_internal.h"
 #include <pthread.h>
+#include <openssl/ssl.h>
 
 #define SRV_MAX_CLIENTS   64
 #define SRV_MAX_USERS     64
@@ -38,6 +39,9 @@ typedef struct {
 
     uint8_t             recv_buf[SRV_RECV_BUF];
     int                 recv_len;
+
+    /* TLS */
+    SSL                *ssl;
 } srv_client_t;
 
 typedef struct {
@@ -73,6 +77,16 @@ struct poc_server {
     /* Sockets */
     int                 listen_fd;
     int                 udp_fd;
+
+    /* TLS */
+    SSL_CTX            *ssl_ctx;
+    bool                tls_enabled;
+    char                tls_cert_path[256];
+    char                tls_key_path[256];
+
+    /* Audio codec (I/O thread — decode incoming, encode injected) */
+    poc_speex_t         speex;
+    uint16_t            inject_seq;  /* UDP sequence for injected audio */
 
     /* I/O thread */
     pthread_t           io_thread;

@@ -61,6 +61,11 @@ typedef struct {
     bool        enable_fec;      /* audio forward error correction */
     int         fec_group_size;  /* FEC group size (0 = default 3) */
     int         gps_interval_ms; /* GPS report interval (0 = default 60000) */
+
+    /* TLS — wraps TCP signaling in TLS; UDP audio stays cleartext */
+    bool        tls;             /* enable TLS for TCP signaling */
+    const char *tls_ca_path;     /* CA cert file (NULL = system default) */
+    bool        tls_verify;      /* verify server cert (default true) */
 } poc_config_t;
 
 /* ── Data types ─────────────────────────────────────────────────── */

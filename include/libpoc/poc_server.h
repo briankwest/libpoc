@@ -28,6 +28,11 @@ typedef struct {
     const char *bind_addr;       /* NULL or "" = "0.0.0.0" */
     uint16_t    port;            /* 0 = default 29999 */
     int         max_clients;     /* 0 = default 64 */
+
+    /* TLS — wraps TCP signaling in TLS; UDP audio stays cleartext */
+    bool        tls;             /* enable TLS */
+    const char *tls_cert_path;   /* server certificate PEM */
+    const char *tls_key_path;    /* server private key PEM */
 } poc_server_config_t;
 
 /* User credentials — add before or after start */
@@ -73,6 +78,12 @@ typedef struct {
     void (*on_group_leave)(poc_server_t *srv, uint32_t user_id,
                            uint32_t group_id, void *ud);
 
+    /* Audio — fires when a client sends voice (decoded 8kHz PCM).
+     * Called from the main thread in poc_server_poll(). */
+    void (*on_audio)(poc_server_t *srv, uint32_t speaker_id,
+                     uint32_t group_id, const int16_t *pcm,
+                     int n_samples, void *ud);
+
     void *userdata;
 } poc_server_callbacks_t;
 
@@ -108,6 +119,19 @@ int  poc_server_pull_to_group(poc_server_t *srv, uint32_t user_id,
                               uint32_t group_id);
 int  poc_server_send_sos(poc_server_t *srv, uint32_t user_id,
                          int alert_type);
+
+/* ── Audio injection (for bridging external audio into PoC) ────── */
+
+int  poc_server_inject_audio(poc_server_t *srv, uint32_t group_id,
+                             uint32_t virtual_user_id,
+                             const int16_t *pcm, int n_samples);
+
+/* Virtual PTT — send start/end notifications as a virtual user.
+ * Use with inject_audio to bridge external audio sources. */
+int  poc_server_start_ptt_for(poc_server_t *srv, uint32_t group_id,
+                              uint32_t virtual_user_id, const char *name);
+int  poc_server_end_ptt_for(poc_server_t *srv, uint32_t group_id,
+                            uint32_t virtual_user_id);
 
 /* ── Query state ────────────────────────────────────────────────── */
 

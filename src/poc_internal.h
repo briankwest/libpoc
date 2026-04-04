@@ -18,6 +18,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <speex/speex.h>
+#include <openssl/ssl.h>
 
 /* ── TCP Frame ("MS" framing) ───────────────────────────────────── */
 
@@ -204,6 +205,13 @@ struct poc_ctx {
      * and event queue are lock-free and do NOT use this mutex. */
     pthread_mutex_t sig_mutex;
     uint8_t         session_id;     /* protected by sig_mutex */
+
+    /* TLS */
+    SSL_CTX        *ssl_ctx;
+    SSL            *ssl;
+    bool            tls_enabled;
+    char            tls_ca_path[256];
+    bool            tls_verify;
 
     /* TCP (send protected by sig_mutex, recv by I/O thread only) */
     int             tcp_fd;

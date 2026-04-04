@@ -299,6 +299,14 @@ poc_ctx_t *poc_create(const poc_config_t *cfg, const poc_callbacks_t *cb)
     ctx->codec = cfg->codec;
     ctx->heartbeat_ms = cfg->heartbeat_ms > 0 ? cfg->heartbeat_ms : HEARTBEAT_DEFAULT_MS;
 
+    /* TLS */
+    ctx->tls_enabled = cfg->tls;
+    ctx->tls_verify = cfg->tls_verify;
+    if (cfg->tls_ca_path)
+        snprintf(ctx->tls_ca_path, sizeof(ctx->tls_ca_path), "%s", cfg->tls_ca_path);
+    else
+        ctx->tls_ca_path[0] = '\0';
+
     atomic_store(&ctx->state, POC_STATE_OFFLINE);
     atomic_store(&ctx->login_state, LOGIN_IDLE);
     atomic_store(&ctx->io_running, false);
