@@ -366,6 +366,18 @@ poc_ctx_t *poc_create(const poc_config_t *cfg, const poc_callbacks_t *cb)
     if (cb)
         ctx->cb = *cb;
 
+    /* Init dynamic arrays */
+    ctx->groups = calloc(DEFAULT_GROUPS, sizeof(poc_group_t));
+    ctx->group_cap = ctx->groups ? DEFAULT_GROUPS : 0;
+    ctx->users = calloc(DEFAULT_USERS, sizeof(poc_user_t));
+    ctx->user_cap = ctx->users ? DEFAULT_USERS : 0;
+    if (!ctx->groups || !ctx->users) {
+        free(ctx->groups); free(ctx->users);
+        pthread_mutex_destroy(&ctx->sig_mutex);
+        free(ctx);
+        return NULL;
+    }
+
     /* Init rings and event queue */
     int rx_frames = cfg->rx_ring_frames > 0 ? cfg->rx_ring_frames : RX_RING_FRAMES;
     int tx_frames = cfg->tx_ring_frames > 0 ? cfg->tx_ring_frames : TX_RING_FRAMES;
@@ -410,6 +422,8 @@ void poc_destroy(poc_ctx_t *ctx)
     poc_fec_destroy(&ctx->fec);
     poc_ring_destroy(&ctx->rx_ring);
     poc_ring_destroy(&ctx->tx_ring);
+    free(ctx->groups);
+    free(ctx->users);
     pthread_mutex_destroy(&ctx->sig_mutex);
     free(ctx);
 }

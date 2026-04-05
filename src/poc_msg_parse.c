@@ -395,7 +395,7 @@ static void handle_user_data(poc_ctx_t *ctx, const uint8_t *data, int len)
         off = 2;
         ctx->group_count = 0;
 
-        for (int i = 0; i < group_count && i < MAX_GROUPS && off < len; i++) {
+        for (int i = 0; i < group_count && i < ctx->group_cap && off < len; i++) {
             if (off + 5 > len) break;
             uint32_t gid = poc_read32(data + off); off += 4;
             int nlen = data[off]; off++;
@@ -423,7 +423,7 @@ static void handle_user_data(poc_ctx_t *ctx, const uint8_t *data, int len)
         int ucount = poc_read16(data + off); off += 2;
         ctx->user_count = 0;
 
-        for (int i = 0; i < ucount && i < MAX_USERS && off + 5 <= len; i++) {
+        for (int i = 0; i < ucount && i < ctx->user_cap && off + 5 <= len; i++) {
             uint32_t uid = poc_read32(data + off); off += 4;
             int nlen = data[off]; off++;
             if (off + nlen + 1 > len) break;
@@ -557,7 +557,7 @@ static void handle_group_notify(poc_ctx_t *ctx, uint8_t cmd,
     switch (cmd) {
     case CMD_NOTIFY_ADD_GROUP:
         /* New group added: [gid(4)][name_len(1)][name(N)] */
-        if (ctx->group_count < MAX_GROUPS && len >= 5) {
+        if (ctx->group_count < ctx->group_cap && len >= 5) {
             poc_group_t *g = &ctx->groups[ctx->group_count];
             g->id = gid;
             int nlen = data[4];

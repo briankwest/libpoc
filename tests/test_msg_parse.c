@@ -21,7 +21,20 @@ static poc_ctx_t *make_ctx(void)
     ctx->login_state = LOGIN_SENT_LOGIN;
     ctx->tcp_fd = -1;
     pthread_mutex_init(&ctx->sig_mutex, NULL);
+    ctx->groups = calloc(DEFAULT_GROUPS, sizeof(poc_group_t));
+    ctx->group_cap = DEFAULT_GROUPS;
+    ctx->users = calloc(DEFAULT_USERS, sizeof(poc_user_t));
+    ctx->user_cap = DEFAULT_USERS;
+    poc_evt_init(&ctx->evt_queue);
     return ctx;
+}
+
+static void free_ctx(poc_ctx_t *ctx)
+{
+    free(ctx->groups);
+    free(ctx->users);
+    pthread_mutex_destroy(&ctx->sig_mutex);
+    free(ctx);
 }
 
 void test_msg_parse(void)
@@ -32,7 +45,7 @@ void test_msg_parse(void)
         poc_ctx_t *ctx = make_ctx();
         int rc = poc_parse_message(ctx, NULL, 0);
         test_assert(rc == POC_ERR, "should error");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     {
@@ -41,7 +54,7 @@ void test_msg_parse(void)
         uint8_t data[] = {0x01};
         int rc = poc_parse_message(ctx, data, 1);
         test_assert(rc == POC_ERR, "should error");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* Challenge triggers validate */
@@ -62,7 +75,7 @@ void test_msg_parse(void)
 
         poc_parse_message(ctx, msg, 10);
         test_assert(ctx->user_id == 42, "user_id from challenge");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     {
@@ -80,7 +93,7 @@ void test_msg_parse(void)
 
         poc_parse_message(ctx, msg, 10);
         test_assert(ctx->challenge_nonce == 0xDEADCAFE, "nonce from challenge");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     {
@@ -102,7 +115,7 @@ void test_msg_parse(void)
         test_assert(ctx->login_state == LOGIN_SENT_VALIDATE,
                     "should advance to SENT_VALIDATE");
         close(sv[0]); close(sv[1]);
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* UserData transitions to ONLINE */
@@ -120,7 +133,7 @@ void test_msg_parse(void)
         poc_parse_message(ctx, msg, 8);
         test_assert(ctx->state == POC_STATE_ONLINE, "should be ONLINE");
         test_assert(ctx->login_state == LOGIN_ONLINE, "login state ONLINE");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* PTT start notification */
@@ -138,7 +151,7 @@ void test_msg_parse(void)
         poc_parse_message(ctx, msg, 7);
         test_assert(ctx->ptt_rx_active, "ptt_rx should be active");
         test_assert(ctx->ptt_speaker_id == 777, "speaker_id");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* PTT start alternate command */
@@ -155,7 +168,7 @@ void test_msg_parse(void)
 
         poc_parse_message(ctx, msg, 7);
         test_assert(ctx->ptt_speaker_id == 888, "speaker from alt cmd");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* PTT end notification */
@@ -173,7 +186,7 @@ void test_msg_parse(void)
 
         poc_parse_message(ctx, msg, 6);
         test_assert(!ctx->ptt_rx_active, "ptt_rx should be cleared");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* Force exit */
@@ -188,7 +201,7 @@ void test_msg_parse(void)
 
         poc_parse_message(ctx, msg, 2);
         test_assert(ctx->state == POC_STATE_OFFLINE, "should be OFFLINE");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* Heartbeat doesn't crash */
@@ -200,7 +213,7 @@ void test_msg_parse(void)
         msg[1] = CMD_HEARTBEAT;
         int rc = poc_parse_message(ctx, msg, 2);
         test_assert(rc == POC_OK, "should succeed");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* Unknown command doesn't crash */
@@ -213,7 +226,7 @@ void test_msg_parse(void)
         memset(msg + 2, 0xAA, 6);
         int rc = poc_parse_message(ctx, msg, 8);
         test_assert(rc == POC_OK, "should not crash");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* Privilege update */
@@ -226,7 +239,7 @@ void test_msg_parse(void)
         poc_write32(msg + 2, 0x0FFF);
         poc_parse_message(ctx, msg, 6);
         test_assert(ctx->privilege == 0x0FFF, "privilege stored");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* Message (ext data) handler */
@@ -256,7 +269,7 @@ void test_msg_parse(void)
             }
         }
         test_assert(found, "should have message event");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* UserData parses groups */
@@ -289,7 +302,7 @@ void test_msg_parse(void)
         test_assert(strcmp(ctx->groups[0].name, "Dispatch") == 0, "group 0 name");
         test_assert(ctx->groups[1].id == 200, "group 1 id");
         test_assert(strcmp(ctx->groups[1].name, "Field") == 0, "group 1 name");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* ── Phase 1: user status handlers ── */
@@ -312,7 +325,7 @@ void test_msg_parse(void)
                 test_assert(evt.user_status.status == 1, "status=online");
             }
         test_assert(found, "should have user_status event");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     {
@@ -331,7 +344,7 @@ void test_msg_parse(void)
                 test_assert(evt.user_removed.user_id == 99, "user_id=99");
             }
         test_assert(found, "should have user_removed event");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     {
@@ -348,7 +361,7 @@ void test_msg_parse(void)
         while (poc_evt_pop(&ctx->evt_queue, &evt))
             if (evt.type == POC_EVT_GROUPS_UPDATED) found = 1;
         test_assert(found, "should fire groups_updated");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     {
@@ -373,7 +386,7 @@ void test_msg_parse(void)
         poc_write32(del + 2, 500);
         poc_parse_message(ctx, del, 6);
         test_assert(ctx->group_count == 0, "should have 0 groups");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     {
@@ -383,7 +396,7 @@ void test_msg_parse(void)
         msg[0] = 0x01; msg[1] = 0x1D; /* CMD_NOTIFY_PKG_ACK */
         int rc = poc_parse_message(ctx, msg, 2);
         test_assert(rc == POC_OK, "should succeed");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* ── Phase 2: temp group + pull ── */
@@ -406,7 +419,7 @@ void test_msg_parse(void)
                 test_assert(evt.tmp_group_invite.inviter_id == 42, "inviter=42");
             }
         test_assert(found, "should have invite event");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     {
@@ -424,7 +437,7 @@ void test_msg_parse(void)
         while (poc_evt_pop(&ctx->evt_queue, &evt))
             if (evt.type == POC_EVT_PULL_TO_GROUP) found = 1;
         test_assert(found, "should have pull event");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* ── Phase 3: voice messages ── */
@@ -445,7 +458,7 @@ void test_msg_parse(void)
                 test_assert(evt.voice_message.from_id == 77, "from=77");
             }
         test_assert(found, "should have voice_message event");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     /* ── Auth failure handling ── */
@@ -479,7 +492,7 @@ void test_msg_parse(void)
         }
         test_assert(found_err, "should have login_error event");
         test_assert(found_offline, "should have offline event");
-        free(ctx);
+        free_ctx(ctx);
     }
 
     {
@@ -503,6 +516,6 @@ void test_msg_parse(void)
         while (poc_evt_pop(&ctx->evt_queue, &evt))
             if (evt.type == POC_EVT_LOGIN_ERROR) found_err = 1;
         test_assert(!found_err, "should NOT have error event");
-        free(ctx);
+        free_ctx(ctx);
     }
 }

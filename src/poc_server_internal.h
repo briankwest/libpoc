@@ -1,5 +1,8 @@
 /*
  * poc_server_internal.h — Server-side internal types
+ *
+ * All client/user/group arrays are dynamically allocated and grown
+ * on demand. Default initial capacities can be overridden.
  */
 
 #ifndef POC_SERVER_INTERNAL_H
@@ -9,15 +12,19 @@
 #include "poc_internal.h"
 #include <pthread.h>
 #include <openssl/ssl.h>
+#include <sys/epoll.h>
 
-#define SRV_MAX_CLIENTS   64
-#define SRV_MAX_USERS     256
-#define SRV_MAX_GROUPS    32
-#define SRV_MAX_GROUP_MEM 32
-#define SRV_RECV_BUF      (64 * 1024)
-#define SRV_LOGIN_TIMEOUT_MS   7000
+/* Default initial capacities (grown dynamically as needed) */
+#define SRV_DEFAULT_CLIENTS   64
+#define SRV_DEFAULT_USERS     64
+#define SRV_DEFAULT_GROUPS    16
+#define SRV_DEFAULT_MEMBERS   16
+
+#define SRV_RECV_BUF             (64 * 1024)
+#define SRV_LOGIN_TIMEOUT_MS     7000
 #define SRV_HEARTBEAT_TIMEOUT_MS 90000   /* 90s — 3x the default 30s interval */
 #define SRV_PTT_FLOOR_TIMEOUT_MS 60000   /* 60s max floor hold without audio */
+#define SRV_EPOLL_BATCH          64      /* max events per epoll_wait call */
 
 typedef enum {
     SRV_CLIENT_NEW,
@@ -59,32 +66,39 @@ typedef struct {
 } srv_user_t;
 
 typedef struct {
-    uint32_t id;
-    char     name[64];
-    uint32_t members[SRV_MAX_GROUP_MEM];
-    int      member_count;
-    int      floor_holder;  /* client index, -1 = free */
+    uint32_t  id;
+    char      name[64];
+    uint32_t *members;       /* dynamically allocated member ID array */
+    int       member_count;
+    int       member_cap;    /* allocated capacity */
+    int       floor_holder;  /* client index, -1 = free */
 } srv_group_t;
 
 struct poc_server {
     /* Config */
     char                bind_addr[64];
     uint16_t            port;
-    int                 max_clients;
+    int                 max_clients;  /* soft limit (0 = unlimited growth) */
 
-    /* Users and groups */
-    srv_user_t          users[SRV_MAX_USERS];
+    /* Users (dynamically allocated) */
+    srv_user_t         *users;
     int                 user_count;
-    srv_group_t         groups[SRV_MAX_GROUPS];
-    int                 group_count;
+    int                 user_cap;
 
-    /* Clients */
-    srv_client_t        clients[SRV_MAX_CLIENTS];
+    /* Groups (dynamically allocated) */
+    srv_group_t        *groups;
+    int                 group_count;
+    int                 group_cap;
+
+    /* Clients (dynamically allocated) */
+    srv_client_t       *clients;
     int                 client_count;
+    int                 client_cap;
 
     /* Sockets */
     int                 listen_fd;
     int                 udp_fd;
+    int                 epoll_fd;     /* epoll instance for I/O thread */
 
     /* TLS */
     SSL_CTX            *ssl_ctx;
@@ -107,5 +121,20 @@ struct poc_server {
     /* Callbacks */
     poc_server_callbacks_t cb;
 };
+
+/* Grow a dynamic array. Returns 0 on success, -1 on alloc failure. */
+static inline int srv_grow(void **arr, int *cap, int elem_size, int min_cap)
+{
+    int new_cap = *cap ? *cap * 2 : min_cap;
+    if (new_cap < min_cap) new_cap = min_cap;
+    void *p = realloc(*arr, (size_t)new_cap * elem_size);
+    if (!p) return -1;
+    /* Zero new slots */
+    memset((char *)p + (size_t)(*cap) * elem_size, 0,
+           (size_t)(new_cap - *cap) * elem_size);
+    *arr = p;
+    *cap = new_cap;
+    return 0;
+}
 
 #endif /* POC_SERVER_INTERNAL_H */

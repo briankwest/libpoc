@@ -106,6 +106,74 @@ void test_fec(void)
                     "should reconstruct f2");
     }
 
+    /* Group size 1 produces parity every frame */
+    {
+        test_begin("fec: group size 1 produces parity every frame");
+        poc_fec_init(&fec, 1);
+        fec.enabled = true;
+
+        uint8_t frame[20];
+        memset(frame, 0xAB, 20);
+        uint8_t out1[64], out2[64];
+
+        int n = poc_fec_encode(&fec, frame, 20, out1, out2, 64);
+        int ok = (n == 2);
+        /* Second call should also produce 2 */
+        n = poc_fec_encode(&fec, frame, 20, out1, out2, 64);
+        ok = ok && (n == 2);
+        test_assert(ok, "group_size=1: every encode returns 2");
+    }
+
+    /* Group size 8 delays parity */
+    {
+        test_begin("fec: group size 8 delays parity");
+        poc_fec_init(&fec, 8);
+        fec.enabled = true;
+
+        uint8_t frame[20];
+        memset(frame, 0xCD, 20);
+        uint8_t out1[64], out2[64];
+
+        int ok = 1;
+        for (int i = 0; i < 7; i++) {
+            int n = poc_fec_encode(&fec, frame, 20, out1, out2, 64);
+            if (n != 1) ok = 0;
+        }
+        int n8 = poc_fec_encode(&fec, frame, 20, out1, out2, 64);
+        if (n8 != 2) ok = 0;
+        test_assert(ok, "first 7 return 1, 8th returns 2");
+    }
+
+    /* Large frame up to max */
+    {
+        test_begin("fec: large frame up to max");
+        poc_fec_init(&fec, 3);
+        fec.enabled = true;
+
+        uint8_t frame[POC_FEC_MAX_FRAME];
+        memset(frame, 0xEE, POC_FEC_MAX_FRAME - 1);
+        uint8_t out1[POC_FEC_MAX_FRAME], out2[POC_FEC_MAX_FRAME];
+
+        int n = poc_fec_encode(&fec, frame, POC_FEC_MAX_FRAME - 1,
+                               out1, out2, POC_FEC_MAX_FRAME);
+        test_assert(n == 1, "MAX_FRAME-1 bytes accepted");
+    }
+
+    /* Oversize frame rejected */
+    {
+        test_begin("fec: oversize frame rejected");
+        poc_fec_init(&fec, 3);
+        fec.enabled = true;
+
+        uint8_t frame[POC_FEC_MAX_FRAME + 2];
+        memset(frame, 0xFF, sizeof(frame));
+        uint8_t out1[POC_FEC_MAX_FRAME + 2], out2[POC_FEC_MAX_FRAME + 2];
+
+        int n = poc_fec_encode(&fec, frame, POC_FEC_MAX_FRAME + 1,
+                               out1, out2, POC_FEC_MAX_FRAME + 1);
+        test_assert(n == 0, "MAX_FRAME+1 bytes rejected");
+    }
+
     /* Destroy is safe */
     {
         test_begin("fec: destroy is safe");

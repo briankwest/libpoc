@@ -60,6 +60,7 @@ extern void test_codec(void);
 extern void test_encrypt(void);
 extern void test_gps(void);
 extern void test_fec(void);
+extern void test_ring(void);
 
 int main(void)
 {
@@ -92,6 +93,9 @@ int main(void)
 
     printf("\nForward Error Correction:\n");
     test_fec();
+
+    printf("\nRing buffer & event queue:\n");
+    test_ring();
 
     printf("\n==================\n");
     printf("Results: %d/%d passed", g_passed, g_total);

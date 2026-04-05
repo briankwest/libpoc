@@ -203,6 +203,12 @@ typedef struct {
     int disconnect_count;
     int message_count;
     int audio_frame_count;
+    int group_enter_count;
+    int group_leave_count;
+    uint32_t last_group_enter_uid;
+    uint32_t last_group_enter_gid;
+    uint32_t last_group_leave_uid;
+    uint32_t last_group_leave_gid;
 } server_state_t;
 
 static void srv_cb_connect(poc_server_t *srv, uint32_t uid,
@@ -236,6 +242,26 @@ static void srv_cb_audio(poc_server_t *srv, uint32_t speaker_id,
     (void)srv; (void)speaker_id; (void)group_id; (void)pcm; (void)n_samples;
     server_state_t *s = (server_state_t *)ud;
     s->audio_frame_count++;
+}
+
+static void srv_cb_group_enter(poc_server_t *srv, uint32_t uid,
+                               uint32_t group_id, void *ud)
+{
+    (void)srv;
+    server_state_t *s = (server_state_t *)ud;
+    s->group_enter_count++;
+    s->last_group_enter_uid = uid;
+    s->last_group_enter_gid = group_id;
+}
+
+static void srv_cb_group_leave(poc_server_t *srv, uint32_t uid,
+                               uint32_t group_id, void *ud)
+{
+    (void)srv;
+    server_state_t *s = (server_state_t *)ud;
+    s->group_leave_count++;
+    s->last_group_leave_uid = uid;
+    s->last_group_leave_gid = group_id;
 }
 
 /* ── Fixture: server + optional clients ────────────────────────── */
@@ -295,6 +321,7 @@ static poc_ctx_t *connect_client(test_server_t *t, const char *account,
 /* ── Check helpers ─────────────────────────────────────────────── */
 
 static client_state_t *g_check_cs;
+static client_state_t *g_check_cs2;
 static server_state_t *g_check_ss;
 static int g_check_target;
 
@@ -332,6 +359,25 @@ static int check_srv_connect(void *ud)
 {
     (void)ud;
     return g_check_ss->connect_count >= g_check_target;
+}
+
+static int check_both_messages_received(void *ud)
+{
+    (void)ud;
+    return g_check_cs->message_count >= g_check_target &&
+           g_check_cs2->message_count >= g_check_target;
+}
+
+static int check_srv_group_enter(void *ud)
+{
+    (void)ud;
+    return g_check_ss->group_enter_count >= g_check_target;
+}
+
+static int check_srv_group_leave(void *ud)
+{
+    (void)ud;
+    return g_check_ss->group_leave_count >= g_check_target;
 }
 
 /* ── Tests ─────────────────────────────────────────────────────── */
@@ -772,6 +818,288 @@ static void test_ptt_no_preempt_equal(void)
     destroy_test_server(&t);
 }
 
+/* ── Additional server fixtures (init-in-place to avoid stale userdata) ── */
+
+static void init_test_server_2groups(test_server_t *t)
+{
+    memset(t, 0, sizeof(*t));
+    t->port = next_port();
+
+    poc_server_config_t cfg = { .bind_addr = "127.0.0.1", .port = t->port };
+    poc_server_callbacks_t cb = {
+        .on_client_connect    = srv_cb_connect,
+        .on_client_disconnect = srv_cb_disconnect,
+        .on_message           = srv_cb_message,
+        .on_audio             = srv_cb_audio,
+        .on_group_enter       = srv_cb_group_enter,
+        .on_group_leave       = srv_cb_group_leave,
+        .userdata             = &t->srv_state,
+    };
+    t->srv = poc_server_create(&cfg, &cb);
+    poc_server_add_user(t->srv, &(poc_server_user_t){
+        .account = "alice", .password = "secret", .name = "Alice", .user_id = 1000 });
+    poc_server_add_user(t->srv, &(poc_server_user_t){
+        .account = "bob", .password = "secret", .name = "Bob", .user_id = 2000 });
+    poc_server_add_group(t->srv, &(poc_server_group_t){
+        .id = 100, .name = "Dispatch", .member_ids = NULL, .member_count = 0 });
+    poc_server_add_group(t->srv, &(poc_server_group_t){
+        .id = 200, .name = "Field", .member_ids = NULL, .member_count = 0 });
+    poc_server_start(t->srv);
+}
+
+static void init_test_server_with_group_cbs(test_server_t *t)
+{
+    memset(t, 0, sizeof(*t));
+    t->port = next_port();
+
+    poc_server_config_t cfg = { .bind_addr = "127.0.0.1", .port = t->port };
+    poc_server_callbacks_t cb = {
+        .on_client_connect    = srv_cb_connect,
+        .on_client_disconnect = srv_cb_disconnect,
+        .on_message           = srv_cb_message,
+        .on_audio             = srv_cb_audio,
+        .on_group_enter       = srv_cb_group_enter,
+        .on_group_leave       = srv_cb_group_leave,
+        .userdata             = &t->srv_state,
+    };
+    t->srv = poc_server_create(&cfg, &cb);
+    poc_server_add_user(t->srv, &(poc_server_user_t){
+        .account = "alice", .password = "secret", .name = "Alice", .user_id = 1000 });
+    poc_server_add_user(t->srv, &(poc_server_user_t){
+        .account = "bob", .password = "secret", .name = "Bob", .user_id = 2000 });
+    poc_server_add_group(t->srv, &(poc_server_group_t){
+        .id = 100, .name = "Dispatch", .member_ids = NULL, .member_count = 0 });
+    poc_server_start(t->srv);
+}
+
+/* ── New integration tests ─────────────────────────────────────── */
+
+static void test_leave_group(void)
+{
+    test_begin("group: leave group succeeds");
+    test_server_t t = create_test_server();
+    client_state_t cs; poc_callbacks_t cb;
+    poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
+
+    g_check_cs = &cs;
+    poll_until(cli, t.srv, check_client_online, NULL, 5000);
+
+    poc_enter_group(cli, 100);
+    poll_until(cli, t.srv, NULL, NULL, 300);
+
+    int rc = poc_leave_group(cli);
+    test_assert(rc == POC_OK, "leave_group should return OK");
+
+    poc_destroy(cli);
+    destroy_test_server(&t);
+}
+
+static void test_private_message(void)
+{
+    test_begin("messaging: private message delivered");
+    test_server_t t = create_test_server();
+
+    client_state_t cs1, cs2;
+    poc_callbacks_t cb1, cb2;
+    poc_ctx_t *alice = connect_client(&t, "alice", &cs1, &cb1);
+    poc_ctx_t *bob   = connect_client(&t, "bob",   &cs2, &cb2);
+
+    g_check_cs = &cs1;
+    poll_until2(alice, bob, t.srv, check_client_online, NULL, 5000);
+    g_check_cs = &cs2;
+    poll_until2(alice, bob, t.srv, check_client_online, NULL, 5000);
+
+    poc_send_user_msg(alice, 2000, "hello bob");
+
+    g_check_cs = &cs2;
+    g_check_target = 1;
+    poll_until2(alice, bob, t.srv, check_message_received, NULL, 3000);
+    test_assert(cs2.message_count >= 1, "Bob should receive private message");
+    test_assert(cs2.last_message_from == 1000, "message should be from alice (uid 1000)");
+    test_assert(strcmp(cs2.last_message, "hello bob") == 0, "message text should match");
+
+    poc_destroy(alice);
+    poc_destroy(bob);
+    destroy_test_server(&t);
+}
+
+static void test_server_kick(void)
+{
+    test_begin("server: kick disconnects client");
+    test_server_t t = create_test_server();
+    client_state_t cs; poc_callbacks_t cb;
+    poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
+
+    g_check_cs = &cs;
+    poll_until(cli, t.srv, check_client_online, NULL, 5000);
+
+    poc_server_kick(t.srv, 1000);
+    poll_until(cli, t.srv, check_client_offline, NULL, 5000);
+    test_assert(cs.state == POC_STATE_OFFLINE, "alice should be offline after kick");
+
+    poc_destroy(cli);
+    destroy_test_server(&t);
+}
+
+static void test_server_broadcast(void)
+{
+    test_begin("server: broadcast reaches all clients");
+    test_server_t t = create_test_server();
+
+    client_state_t cs1, cs2;
+    poc_callbacks_t cb1, cb2;
+    poc_ctx_t *alice = connect_client(&t, "alice", &cs1, &cb1);
+    poc_ctx_t *bob   = connect_client(&t, "bob",   &cs2, &cb2);
+
+    g_check_cs = &cs1;
+    poll_until2(alice, bob, t.srv, check_client_online, NULL, 5000);
+    g_check_cs = &cs2;
+    poll_until2(alice, bob, t.srv, check_client_online, NULL, 5000);
+
+    poc_server_broadcast(t.srv, "alert");
+
+    g_check_cs = &cs1;
+    g_check_cs2 = &cs2;
+    g_check_target = 1;
+    poll_until2(alice, bob, t.srv, check_both_messages_received, NULL, 3000);
+    test_assert(cs1.message_count >= 1 && cs2.message_count >= 1,
+                "both clients should receive broadcast");
+
+    poc_destroy(alice);
+    poc_destroy(bob);
+    destroy_test_server(&t);
+}
+
+static void test_disconnect_during_ptt(void)
+{
+    test_begin("ptt: disconnect during PTT frees floor");
+    test_server_t t = create_test_server();
+
+    client_state_t cs1, cs2;
+    poc_callbacks_t cb1, cb2;
+    poc_ctx_t *alice = connect_client(&t, "alice", &cs1, &cb1);
+    poc_ctx_t *bob   = connect_client(&t, "bob",   &cs2, &cb2);
+
+    g_check_cs = &cs1;
+    poll_until2(alice, bob, t.srv, check_client_online, NULL, 5000);
+    g_check_cs = &cs2;
+    poll_until2(alice, bob, t.srv, check_client_online, NULL, 5000);
+
+    poc_enter_group(alice, 100);
+    poc_enter_group(bob, 100);
+    poll_until2(alice, bob, t.srv, NULL, NULL, 300);
+
+    cs1.ptt_granted = -1;
+    poc_ptt_start(alice);
+    g_check_cs = &cs1;
+    poll_until2(alice, bob, t.srv, check_ptt_granted, NULL, 3000);
+
+    poc_destroy(alice);
+    poll_until(bob, t.srv, NULL, NULL, 2000);
+
+    cs2.ptt_granted = -1;
+    poc_ptt_start(bob);
+    g_check_cs = &cs2;
+    poll_until(bob, t.srv, check_ptt_granted, NULL, 5000);
+    test_assert(cs2.ptt_granted == 1, "Bob should get floor after Alice disconnects");
+
+    poc_ptt_stop(bob);
+    poc_destroy(bob);
+    destroy_test_server(&t);
+}
+
+static void test_multiple_groups(void)
+{
+    test_begin("group: entering new group leaves old group");
+    test_server_t t;
+    init_test_server_2groups(&t);
+    client_state_t cs; poc_callbacks_t cb;
+    poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
+
+    g_check_cs = &cs;
+    g_check_ss = &t.srv_state;
+    poll_until(cli, t.srv, check_client_online, NULL, 5000);
+
+    test_assert(cs.group_count >= 2, "should receive at least 2 groups");
+
+    int rc = poc_enter_group(cli, 100);
+    test_assert(rc == POC_OK, "enter group 100 should return OK");
+    poll_until(cli, t.srv, NULL, NULL, 300);
+
+    rc = poc_enter_group(cli, 200);
+    test_assert(rc == POC_OK, "enter group 200 should return OK");
+    g_check_target = 2;
+    poll_until(cli, t.srv, check_srv_group_enter, NULL, 3000);
+    test_assert(t.srv_state.group_enter_count >= 2, "should fire on_group_enter twice");
+
+    poc_destroy(cli);
+    destroy_test_server(&t);
+}
+
+static void test_server_inject_audio(void)
+{
+    test_begin("server: inject audio reaches listener");
+    test_server_t t = create_test_server();
+    client_state_t cs; poc_callbacks_t cb;
+    poc_ctx_t *bob = connect_client(&t, "bob", &cs, &cb);
+
+    g_check_cs = &cs;
+    poll_until(bob, t.srv, check_client_online, NULL, 5000);
+
+    poc_enter_group(bob, 100);
+    poll_until(bob, t.srv, NULL, NULL, 300);
+
+    poc_server_start_ptt_for(t.srv, 100, 9999, "Injector");
+    poll_until(bob, t.srv, NULL, NULL, 500);
+
+    int16_t tone[160];
+    for (int i = 0; i < 160; i++)
+        tone[i] = (int16_t)(8000.0 * sin(2.0 * 3.14159265 * 1000.0 * i / 8000.0));
+
+    for (int f = 0; f < 20; f++) {
+        poc_server_inject_audio(t.srv, 100, 9999, tone, 160);
+        poll_until(bob, t.srv, NULL, NULL, 50);
+    }
+
+    g_check_target = 1;
+    poll_until(bob, t.srv, check_audio_received, NULL, 5000);
+    test_assert(cs.audio_frame_count > 0, "Bob should receive injected audio frames");
+
+    poc_server_end_ptt_for(t.srv, 100, 9999);
+    poc_destroy(bob);
+    destroy_test_server(&t);
+}
+
+static void test_server_group_callbacks(void)
+{
+    test_begin("server: on_group_enter/leave callbacks fire");
+    test_server_t t;
+    init_test_server_with_group_cbs(&t);
+    client_state_t cs; poc_callbacks_t cb;
+    poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
+
+    g_check_cs = &cs;
+    g_check_ss = &t.srv_state;
+    poll_until(cli, t.srv, check_client_online, NULL, 5000);
+
+    poc_enter_group(cli, 100);
+    g_check_target = 1;
+    poll_until(cli, t.srv, check_srv_group_enter, NULL, 3000);
+    test_assert(t.srv_state.group_enter_count >= 1, "on_group_enter should fire");
+    test_assert(t.srv_state.last_group_enter_uid == 1000, "on_group_enter uid should be alice");
+    test_assert(t.srv_state.last_group_enter_gid == 100, "on_group_enter gid should be 100");
+
+    poc_leave_group(cli);
+    g_check_target = 1;
+    poll_until(cli, t.srv, check_srv_group_leave, NULL, 3000);
+    test_assert(t.srv_state.group_leave_count >= 1, "on_group_leave should fire");
+    test_assert(t.srv_state.last_group_leave_uid == 1000, "on_group_leave uid should be alice");
+    test_assert(t.srv_state.last_group_leave_gid == 100, "on_group_leave gid should be 100");
+
+    poc_destroy(cli);
+    destroy_test_server(&t);
+}
+
 /* ── Entry point ───────────────────────────────────────────────── */
 
 int main(void)
@@ -790,6 +1118,8 @@ int main(void)
 
     printf("\nGroup operations:\n");
     test_enter_group();
+    test_leave_group();
+    test_multiple_groups();
 
     printf("\nPTT floor arbitration:\n");
     test_ptt_grant();
@@ -797,12 +1127,22 @@ int main(void)
     test_ptt_stop_releases_floor();
     test_ptt_preemption();
     test_ptt_no_preempt_equal();
+    test_disconnect_during_ptt();
 
     printf("\nAudio:\n");
     test_audio_roundtrip();
+    test_server_inject_audio();
 
     printf("\nMessaging:\n");
     test_group_message();
+    test_private_message();
+
+    printf("\nServer actions:\n");
+    test_server_kick();
+    test_server_broadcast();
+
+    printf("\nServer callbacks:\n");
+    test_server_group_callbacks();
 
     printf("\n==============================\n");
     printf("Results: %d/%d passed", g_passed, g_total);

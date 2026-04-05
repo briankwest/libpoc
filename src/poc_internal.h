@@ -163,10 +163,10 @@ typedef struct {
     uint32_t dec_received;  /* bitmask */
 } poc_fec_t;
 
-/* ── Group storage ──────────────────────────────────────────────── */
+/* ── Default initial capacities (grown dynamically) ────────────── */
 
-#define MAX_GROUPS  64
-#define MAX_USERS   256
+#define DEFAULT_GROUPS  64
+#define DEFAULT_USERS   64
 
 /* ── Context ────────────────────────────────────────────────────── */
 
@@ -226,13 +226,15 @@ struct poc_ctx {
     uint32_t        ptt_speaker_id;
     char            ptt_speaker_name[64];
 
-    /* Groups (protected by sig_mutex) */
-    poc_group_t     groups[MAX_GROUPS];
+    /* Groups (protected by sig_mutex, dynamically allocated) */
+    poc_group_t    *groups;
     int             group_count;
+    int             group_cap;
     uint32_t        active_group_id;
 
-    poc_user_t      users[MAX_USERS];
+    poc_user_t     *users;
     int             user_count;
+    int             user_cap;
 
     /* Audio codec (I/O thread only — NOT thread-safe) */
     poc_codec_t    *codec;

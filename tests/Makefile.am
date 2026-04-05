@@ -10,7 +10,8 @@ test_libpoc_SOURCES = \
 	test_codec.c \
 	test_encrypt.c \
 	test_gps.c \
-	test_fec.c
+	test_fec.c \
+	test_ring.c
 
 test_libpoc_CFLAGS = \
 	-std=c11 -D_GNU_SOURCE \

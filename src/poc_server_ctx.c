@@ -14,7 +14,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <poll.h>
+#include <poll.h>        /* TLS handshake only */
+#include <sys/epoll.h>  /* I/O thread */
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <openssl/sha.h>
@@ -151,6 +152,7 @@ static void srv_disconnect(poc_server_t *srv, int idx)
     }
 
     if (cl->ssl) { SSL_shutdown(cl->ssl); SSL_free(cl->ssl); cl->ssl = NULL; }
+    epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, cl->fd, NULL);
     close(cl->fd);
     srv->client_count--;
     if (idx < srv->client_count) {
@@ -817,34 +819,40 @@ static void *srv_io_thread(void *arg)
     poc_log_at(POC_LOG_INFO, "srv: I/O thread started");
 
     while (atomic_load(&srv->io_running)) {
-        struct pollfd fds[3 + SRV_MAX_CLIENTS];
-        int nfds = 0;
-
-        fds[nfds].fd = srv->wakeup[0]; fds[nfds].events = POLLIN; nfds++;
-        fds[nfds].fd = srv->listen_fd; fds[nfds].events = POLLIN; nfds++;
-        fds[nfds].fd = srv->udp_fd; fds[nfds].events = POLLIN; nfds++;
-
-        for (int i = 0; i < srv->client_count; i++) {
-            fds[nfds].fd = srv->clients[i].fd;
-            fds[nfds].events = POLLIN;
-            nfds++;
-        }
-
-        int rc = poll(fds, nfds, 100);
-        if (rc < 0) { if (errno == EINTR) continue; break; }
+        struct epoll_event events[SRV_EPOLL_BATCH];
+        int n = epoll_wait(srv->epoll_fd, events, SRV_EPOLL_BATCH, 100);
+        if (n < 0) { if (errno == EINTR) continue; break; }
         if (!atomic_load(&srv->io_running)) break;
 
-        /* Drain wakeup */
-        if (fds[0].revents & POLLIN) {
-            char tmp[64]; while (read(srv->wakeup[0], tmp, sizeof(tmp)) > 0);
-        }
+        for (int e = 0; e < n; e++) {
+            int fd = events[e].data.fd;
+            uint32_t ev = events[e].events;
 
-        /* Accept */
-        if (fds[1].revents & POLLIN) {
-            struct sockaddr_in ca;
-            socklen_t cl = sizeof(ca);
-            int cfd = accept(srv->listen_fd, (struct sockaddr *)&ca, &cl);
-            if (cfd >= 0 && srv->client_count < srv->max_clients) {
+            /* Drain wakeup */
+            if (fd == srv->wakeup[0]) {
+                char tmp[64]; while (read(srv->wakeup[0], tmp, sizeof(tmp)) > 0);
+                continue;
+            }
+
+            /* UDP audio */
+            if (fd == srv->udp_fd) {
+                srv_handle_udp(srv);
+                continue;
+            }
+
+            /* Accept new client */
+            if (fd == srv->listen_fd) {
+                struct sockaddr_in ca;
+                socklen_t cl = sizeof(ca);
+                int cfd = accept(srv->listen_fd, (struct sockaddr *)&ca, &cl);
+                if (cfd < 0) continue;
+
+                /* Enforce soft limit if set */
+                if (srv->max_clients > 0 && srv->client_count >= srv->max_clients) {
+                    close(cfd);
+                    continue;
+                }
+
                 int fl = fcntl(cfd, F_GETFL, 0);
                 fcntl(cfd, F_SETFL, fl | O_NONBLOCK);
 
@@ -853,7 +861,6 @@ static void *srv_io_thread(void *arg)
                 if (srv->tls_enabled && srv->ssl_ctx) {
                     client_ssl = SSL_new(srv->ssl_ctx);
                     SSL_set_fd(client_ssl, cfd);
-                    /* Non-blocking accept — retry up to 2s */
                     int tls_ok = 0;
                     for (int att = 0; att < 8; att++) {
                         int ret = SSL_accept(client_ssl);
@@ -875,29 +882,42 @@ static void *srv_io_thread(void *arg)
                     }
                 }
 
+                /* Grow clients array if needed */
+                if (srv->client_count >= srv->client_cap) {
+                    if (srv_grow((void **)&srv->clients, &srv->client_cap,
+                                 sizeof(srv_client_t), SRV_DEFAULT_CLIENTS) < 0) {
+                        poc_log_at(POC_LOG_ERROR, "srv: failed to grow clients array");
+                        if (client_ssl) SSL_free(client_ssl);
+                        close(cfd);
+                        continue;
+                    }
+                }
+
                 srv_client_t *c = &srv->clients[srv->client_count++];
                 memset(c, 0, sizeof(*c));
                 c->fd = cfd;
                 c->ssl = client_ssl;
                 c->state = SRV_CLIENT_NEW;
+
+                /* Register with epoll */
+                struct epoll_event cev = { .events = EPOLLIN, .data.fd = cfd };
+                epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, cfd, &cev);
+
                 poc_log_at(POC_LOG_INFO, "srv: new client connected from %s%s",
                            inet_ntoa(ca.sin_addr), client_ssl ? " (TLS)" : "");
-            } else if (cfd >= 0) {
-                close(cfd);
+                continue;
             }
-        }
 
-        /* UDP */
-        if (fds[2].revents & POLLIN)
-            srv_handle_udp(srv);
-
-        /* Client TCP */
-        for (int i = 0; i < srv->client_count; i++) {
-            int pidx = 3 + i;
-            if (pidx >= nfds) break;
-            if (fds[pidx].revents & (POLLERR | POLLHUP)) { srv_disconnect(srv, i); i--; continue; }
-            if (fds[pidx].revents & POLLIN) {
-                if (srv_tcp_recv(srv, i) < 0) { srv_disconnect(srv, i); i--; }
+            /* Client TCP — find client by fd */
+            for (int i = 0; i < srv->client_count; i++) {
+                if (srv->clients[i].fd != fd) continue;
+                if (ev & (EPOLLERR | EPOLLHUP)) {
+                    srv_disconnect(srv, i);
+                } else if (ev & EPOLLIN) {
+                    if (srv_tcp_recv(srv, i) < 0)
+                        srv_disconnect(srv, i);
+                }
+                break;
             }
         }
 
@@ -949,16 +969,30 @@ poc_server_t *poc_server_create(const poc_server_config_t *cfg,
     snprintf(srv->bind_addr, sizeof(srv->bind_addr), "%s",
              (cfg && cfg->bind_addr && cfg->bind_addr[0]) ? cfg->bind_addr : "0.0.0.0");
     srv->port = (cfg && cfg->port) ? cfg->port : 29999;
-    srv->max_clients = (cfg && cfg->max_clients > 0) ? cfg->max_clients : SRV_MAX_CLIENTS;
-    if (srv->max_clients > SRV_MAX_CLIENTS) srv->max_clients = SRV_MAX_CLIENTS;
+    srv->max_clients = (cfg && cfg->max_clients > 0) ? cfg->max_clients : 0; /* 0 = unlimited */
 
     srv->listen_fd = -1;
     srv->udp_fd = -1;
+    srv->epoll_fd = -1;
     srv->wakeup[0] = srv->wakeup[1] = -1;
     atomic_store(&srv->io_running, false);
     poc_evt_init(&srv->evt_queue);
 
-    for (int i = 0; i < SRV_MAX_GROUPS; i++) srv->groups[i].floor_holder = -1;
+    /* Allocate initial dynamic arrays */
+    srv->clients = calloc(SRV_DEFAULT_CLIENTS, sizeof(srv_client_t));
+    srv->client_cap = srv->clients ? SRV_DEFAULT_CLIENTS : 0;
+    srv->users = calloc(SRV_DEFAULT_USERS, sizeof(srv_user_t));
+    srv->user_cap = srv->users ? SRV_DEFAULT_USERS : 0;
+    srv->groups = calloc(SRV_DEFAULT_GROUPS, sizeof(srv_group_t));
+    srv->group_cap = srv->groups ? SRV_DEFAULT_GROUPS : 0;
+
+    if (!srv->clients || !srv->users || !srv->groups) {
+        free(srv->clients); free(srv->users); free(srv->groups);
+        free(srv);
+        return NULL;
+    }
+
+    for (int i = 0; i < srv->group_cap; i++) srv->groups[i].floor_holder = -1;
 
     /* TLS config */
     srv->tls_enabled = (cfg && cfg->tls);
@@ -981,12 +1015,24 @@ void poc_server_destroy(poc_server_t *srv)
     poc_server_stop(srv);
     poc_codec_destroy(srv->codec);
     if (srv->ssl_ctx) { SSL_CTX_free(srv->ssl_ctx); srv->ssl_ctx = NULL; }
+    /* Free group member arrays */
+    for (int i = 0; i < srv->group_count; i++)
+        free(srv->groups[i].members);
+    free(srv->clients);
+    free(srv->users);
+    free(srv->groups);
+    if (srv->epoll_fd >= 0) close(srv->epoll_fd);
     free(srv);
 }
 
 int poc_server_add_user(poc_server_t *srv, const poc_server_user_t *user)
 {
-    if (!srv || !user || srv->user_count >= SRV_MAX_USERS) return POC_ERR;
+    if (!srv || !user) return POC_ERR;
+    if (srv->user_count >= srv->user_cap) {
+        if (srv_grow((void **)&srv->users, &srv->user_cap,
+                     sizeof(srv_user_t), SRV_DEFAULT_USERS) < 0)
+            return POC_ERR_NOMEM;
+    }
     srv_user_t *u = &srv->users[srv->user_count++];
     snprintf(u->account, sizeof(u->account), "%s", user->account);
     snprintf(u->name, sizeof(u->name), "%s", user->name ? user->name : user->account);
@@ -998,17 +1044,30 @@ int poc_server_add_user(poc_server_t *srv, const poc_server_user_t *user)
 
 int poc_server_add_group(poc_server_t *srv, const poc_server_group_t *group)
 {
-    if (!srv || !group || srv->group_count >= SRV_MAX_GROUPS) return POC_ERR;
+    if (!srv || !group) return POC_ERR;
+    if (srv->group_count >= srv->group_cap) {
+        int old_cap = srv->group_cap;
+        if (srv_grow((void **)&srv->groups, &srv->group_cap,
+                     sizeof(srv_group_t), SRV_DEFAULT_GROUPS) < 0)
+            return POC_ERR_NOMEM;
+        /* Init floor_holder for new slots */
+        for (int i = old_cap; i < srv->group_cap; i++)
+            srv->groups[i].floor_holder = -1;
+    }
     srv_group_t *g = &srv->groups[srv->group_count++];
     g->id = group->id;
     snprintf(g->name, sizeof(g->name), "%s", group->name);
     g->floor_holder = -1;
+    g->members = NULL;
+    g->member_count = 0;
+    g->member_cap = 0;
     if (group->member_ids && group->member_count > 0) {
-        int n = group->member_count < SRV_MAX_GROUP_MEM ? group->member_count : SRV_MAX_GROUP_MEM;
-        for (int i = 0; i < n; i++) g->members[i] = group->member_ids[i];
-        g->member_count = n;
-    } else {
-        g->member_count = 0;  /* open group — all users allowed */
+        g->members = malloc(group->member_count * sizeof(uint32_t));
+        if (g->members) {
+            memcpy(g->members, group->member_ids, group->member_count * sizeof(uint32_t));
+            g->member_count = group->member_count;
+            g->member_cap = group->member_count;
+        }
     }
     return POC_OK;
 }
@@ -1030,6 +1089,7 @@ int poc_server_remove_group(poc_server_t *srv, uint32_t group_id)
     if (!srv) return POC_ERR;
     for (int i = 0; i < srv->group_count; i++) {
         if (srv->groups[i].id == group_id) {
+            free(srv->groups[i].members);
             srv->groups[i] = srv->groups[--srv->group_count];
             return POC_OK;
         }
@@ -1092,6 +1152,20 @@ int poc_server_start(poc_server_t *srv)
     pipe(srv->wakeup);
     fl = fcntl(srv->wakeup[0], F_GETFL, 0); fcntl(srv->wakeup[0], F_SETFL, fl | O_NONBLOCK);
 
+    /* Create epoll and register initial fds */
+    srv->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (srv->epoll_fd < 0) {
+        poc_log_at(POC_LOG_ERROR, "srv: epoll_create1 failed: %s", strerror(errno));
+        return POC_ERR;
+    }
+    struct epoll_event ev;
+    ev.events = EPOLLIN; ev.data.fd = srv->wakeup[0];
+    epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, srv->wakeup[0], &ev);
+    ev.data.fd = srv->listen_fd;
+    epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, srv->listen_fd, &ev);
+    ev.data.fd = srv->udp_fd;
+    epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, srv->udp_fd, &ev);
+
     /* Start I/O thread */
     atomic_store(&srv->io_running, true);
     if (pthread_create(&srv->io_thread, NULL, srv_io_thread, srv) != 0) {
@@ -1118,6 +1192,7 @@ int poc_server_stop(poc_server_t *srv)
     if (srv->udp_fd >= 0) { close(srv->udp_fd); srv->udp_fd = -1; }
     if (srv->wakeup[0] >= 0) { close(srv->wakeup[0]); srv->wakeup[0] = -1; }
     if (srv->wakeup[1] >= 0) { close(srv->wakeup[1]); srv->wakeup[1] = -1; }
+    if (srv->epoll_fd >= 0) { close(srv->epoll_fd); srv->epoll_fd = -1; }
     return POC_OK;
 }
 
@@ -1248,7 +1323,15 @@ int poc_server_send_message(poc_server_t *srv, uint32_t from_id,
 
 int poc_server_broadcast(poc_server_t *srv, const char *text)
 {
-    return poc_server_send_message(srv, 0, 0, text);
+    if (!srv || !text) return POC_ERR;
+    uint8_t relay[512];
+    int off = 0;
+    relay[off++] = 0; relay[off++] = POC_NOTIFY_EXT_DATA;
+    poc_write32(relay + off, 0); off += 4;  /* from_id = 0 (server) */
+    int tlen = strlen(text) + 1;
+    if (tlen + off < (int)sizeof(relay)) { memcpy(relay + off, text, tlen); off += tlen; }
+    srv_broadcast_all(srv, relay, off, -1);
+    return POC_OK;
 }
 
 int poc_server_kick(poc_server_t *srv, uint32_t user_id)
