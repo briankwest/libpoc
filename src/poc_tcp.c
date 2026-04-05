@@ -7,6 +7,7 @@
 
 #include "poc_internal.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -171,9 +172,10 @@ int poc_tcp_send_frame(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len)
     hdr[1] = MS_MAGIC_1;
     poc_write16(hdr + 2, len);
 
-    /* Send header */
+    /* Build frame: header + payload */
     int total = MS_HDR_LEN + len;
-    uint8_t frame[MS_HDR_LEN + MS_MAX_PAYLOAD];
+    uint8_t *frame = malloc(total);
+    if (!frame) return POC_ERR_NOMEM;
     memcpy(frame, hdr, MS_HDR_LEN);
     memcpy(frame + MS_HDR_LEN, payload, len);
 
@@ -190,6 +192,7 @@ int poc_tcp_send_frame(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len)
                     continue;
                 }
                 poc_log_at(POC_LOG_ERROR, "TLS send error (SSL error %d)", err);
+                free(frame);
                 return POC_ERR_NETWORK;
             }
         } else {
@@ -200,6 +203,7 @@ int poc_tcp_send_frame(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len)
                     continue;
                 }
                 poc_log_at(POC_LOG_ERROR, "tcp send error: %s", strerror(errno));
+                free(frame);
                 return POC_ERR_NETWORK;
             }
         }
@@ -207,6 +211,7 @@ int poc_tcp_send_frame(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len)
         retries = 0;
     }
 
+    free(frame);
     return POC_OK;
 }
 
@@ -263,6 +268,11 @@ int poc_tcp_recv(poc_ctx_t *ctx)
         }
 
         uint16_t payload_len = poc_read16(buf + 2);
+        if (payload_len < 2) {
+            poc_log_at(POC_LOG_WARNING, "tcp: payload too short (%d), skipping", payload_len);
+            remaining = 0;
+            break;
+        }
         int frame_total = MS_HDR_LEN + payload_len;
 
         if (remaining < frame_total)

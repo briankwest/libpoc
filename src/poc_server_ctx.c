@@ -35,23 +35,35 @@ static void srv_sha1_hex(const char *input, char *hex)
 
 static int srv_send_frame_ssl(int fd, SSL *ssl, const uint8_t *payload, uint16_t len)
 {
-    uint8_t frame[POC_MS_HDR_LEN + 65535];
+    int total = POC_MS_HDR_LEN + len;
+    uint8_t *frame = malloc(total);
+    if (!frame) return POC_ERR_NOMEM;
     frame[0] = POC_MS_MAGIC_0;
     frame[1] = POC_MS_MAGIC_1;
     poc_write16(frame + 2, len);
     memcpy(frame + POC_MS_HDR_LEN, payload, len);
-    int total = POC_MS_HDR_LEN + len, sent = 0;
+    int sent = 0;
     while (sent < total) {
         int n;
         if (ssl) {
             n = SSL_write(ssl, frame + sent, total - sent);
-            if (n <= 0) return POC_ERR_NETWORK;
+            if (n <= 0) {
+                int err = SSL_get_error(ssl, n);
+                if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) continue;
+                free(frame);
+                return POC_ERR_NETWORK;
+            }
         } else {
             n = send(fd, frame + sent, total - sent, MSG_NOSIGNAL);
-            if (n <= 0) return POC_ERR_NETWORK;
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EINTR) continue;
+                free(frame);
+                return POC_ERR_NETWORK;
+            }
         }
         sent += n;
     }
+    free(frame);
     return POC_OK;
 }
 

@@ -84,12 +84,18 @@ static int aes_ecb_crypt(const uint8_t *key, int key_len,
                                (key_len >= 24) ? EVP_aes_192_ecb() :
                                                  EVP_aes_128_ecb();
 
-    EVP_CipherInit_ex(evp, cipher, NULL, key, NULL, encrypt);
+    if (EVP_CipherInit_ex(evp, cipher, NULL, key, NULL, encrypt) != 1) {
+        EVP_CIPHER_CTX_free(evp);
+        return -1;
+    }
     EVP_CIPHER_CTX_set_padding(evp, 1);
 
     int out_len = 0, final_len = 0;
-    EVP_CipherUpdate(evp, out, &out_len, in, in_len);
-    EVP_CipherFinal_ex(evp, out + out_len, &final_len);
+    if (EVP_CipherUpdate(evp, out, &out_len, in, in_len) != 1 ||
+        EVP_CipherFinal_ex(evp, out + out_len, &final_len) != 1) {
+        EVP_CIPHER_CTX_free(evp);
+        return -1;
+    }
     EVP_CIPHER_CTX_free(evp);
 
     return out_len + final_len;

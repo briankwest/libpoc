@@ -77,6 +77,8 @@ int poc_fec_decode(poc_fec_t *fec, const uint8_t *in, int in_len,
 {
     if (in_len > out_max || in_len > POC_FEC_MAX_FRAME)
         return 0;
+    if (seq_in_group < 0 || seq_in_group > fec->group_size)
+        return 0;
 
     /* Store frame in decode window */
     if (seq_in_group < fec->group_size) {
