@@ -56,10 +56,7 @@ static void test_assert(int cond, const char *msg)
     if (cond) test_pass(); else test_fail(msg);
 }
 
-static void test_end(void)
-{
-    if (g_in_test) test_pass();
-}
+
 
 /* ── Test port allocation ──────────────────────────────────────── */
 
@@ -353,12 +350,6 @@ static int check_audio_received(void *ud)
 {
     (void)ud;
     return g_check_cs->audio_frame_count >= g_check_target;
-}
-
-static int check_srv_connect(void *ud)
-{
-    (void)ud;
-    return g_check_ss->connect_count >= g_check_target;
 }
 
 static int check_both_messages_received(void *ud)

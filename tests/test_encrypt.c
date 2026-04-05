@@ -34,7 +34,6 @@ void test_encrypt(void)
         test_begin("encrypt: AES encrypt/decrypt roundtrip");
         uint8_t plaintext[20] = "hello poc audio!!!!";
         uint8_t ciphertext[48];
-        uint8_t decrypted[48];
 
         int elen = poc_encrypt_audio(&enc, 0, plaintext, 20, ciphertext, sizeof(ciphertext));
         test_assert(elen > 0, "encrypt should produce output");

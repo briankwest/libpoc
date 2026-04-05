@@ -687,10 +687,6 @@ static void handle_ext_data(poc_ctx_t *ctx, const uint8_t *data, int len)
     /* Regular text message */
     const char *text = (const char *)(data + 4);
     int text_max = len - 4;
-    bool terminated = false;
-    for (int i = 0; i < text_max; i++) {
-        if (text[i] == '\0') { terminated = true; break; }
-    }
 
     poc_log("message from user %u: %.*s", from_id, text_max, text);
 

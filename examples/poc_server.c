@@ -121,8 +121,9 @@ static int load_config(poc_server_t *srv, const char *path)
             uint32_t gid = atoi(key);
             char *colon = strchr(val, ':');
             char name[64] = "";
-            uint32_t members[32];
+            uint32_t members[32] = {0};
             int mcount = 0;
+            (void)members; (void)mcount;
 
             if (colon) {
                 *colon = '\0';
@@ -132,7 +133,7 @@ static int load_config(poc_server_t *srv, const char *path)
                     /* Find user_id by account name */
                     /* Simple: assume user_ids start at 1000 in order */
                     char *acct = trim(tok);
-                    poc_user_t clients[64];
+                    /* poc_user_t clients[64]; — unused, config is simple */
                     /* We don't have a lookup — just use index-based IDs */
                     /* This is a limitation of the simple config format */
                     (void)acct;

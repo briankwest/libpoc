@@ -96,7 +96,7 @@ void test_ring(void)
 
         poc_ring_push(&r, samples, 320, 0, 0);
 
-        poc_ring_frame_t frame;
+        poc_ring_frame_t frame = {0};
         poc_ring_pop(&r, &frame);
         test_assert(frame.n_samples == 320, "n_samples==320 after pop");
         poc_ring_destroy(&r);
@@ -112,7 +112,7 @@ void test_ring(void)
 
         poc_ring_push(&r, samples, 160, 42, 99);
 
-        poc_ring_frame_t frame;
+        poc_ring_frame_t frame = {0};
         poc_ring_pop(&r, &frame);
         test_assert(frame.speaker_id == 42 && frame.group_id == 99,
                     "metadata roundtrip");

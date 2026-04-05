@@ -20,11 +20,6 @@ static int build_ms_frame(uint8_t *buf, const uint8_t *payload, uint16_t len)
     return MS_HDR_LEN + len;
 }
 
-/* Stub context for frame parsing tests */
-static int g_parse_count;
-static uint8_t g_last_cmd;
-static int g_last_len;
-
 /* Override poc_parse_message for testing */
 int __real_poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len);
 

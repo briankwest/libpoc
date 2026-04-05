@@ -643,6 +643,8 @@ int poc_poll(poc_ctx_t *ctx, int timeout_ms)
             if (ctx->cb.on_typing)
                 ctx->cb.on_typing(ctx, evt.typing.user_id, evt.typing.typing, ctx->cb.userdata);
             break;
+        case POC_EVT_AUDIO:
+            break;  /* server-only event, not used in client context */
         }
     }
 

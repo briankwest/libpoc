@@ -394,13 +394,11 @@ static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx
      *   - Floor held by equal/higher-priority user → deny */
     bool grant = true;
     int old_holder = srv->groups[gidx].floor_holder;
-    bool preempted = false;
 
     if (old_holder >= 0 && old_holder != cl_idx) {
         srv_client_t *holder = &srv->clients[old_holder];
         if (cl->priority > holder->priority) {
             /* Pre-empt: force-end the current holder's PTT */
-            preempted = true;
             poc_log_at(POC_LOG_INFO, "srv: %s (pri %u) pre-empting %s (pri %u) on group %u",
                        cl->account, cl->priority, holder->account, holder->priority,
                        cl->active_group);
@@ -531,7 +529,6 @@ static void srv_handle_ext_data(poc_server_t *srv, srv_client_t *cl, const uint8
     if (len >= 11) {
         uint8_t m = data[10];
         if (m == 0xFD || m == 0xFC || m == 0xFB) {
-            const char *names[] = { [0xFB] = "typing", [0xFC] = "delivered", [0xFD] = "read" };
             bool is_typing = (m == 0xFB && len >= 12) ? data[11] != 0 : false;
             poc_log_at(POC_LOG_DEBUG, "srv: %s → %u: %s%s",
                        cl->account, target_id,
@@ -1149,7 +1146,12 @@ int poc_server_start(poc_server_t *srv)
     fcntl(srv->udp_fd, F_SETFL, fl | O_NONBLOCK);
 
     /* Wakeup pipe */
-    pipe(srv->wakeup);
+    if (pipe(srv->wakeup) < 0) {
+        poc_log_at(POC_LOG_ERROR, "srv: pipe() failed: %s", strerror(errno));
+        close(srv->listen_fd); srv->listen_fd = -1;
+        close(srv->udp_fd); srv->udp_fd = -1;
+        return POC_ERR;
+    }
     fl = fcntl(srv->wakeup[0], F_GETFL, 0); fcntl(srv->wakeup[0], F_SETFL, fl | O_NONBLOCK);
 
     /* Create epoll and register initial fds */
