@@ -18,14 +18,22 @@ test_libpoc_CFLAGS = \
 	-I$(top_srcdir)/include/libpoc \
 	-I$(top_srcdir)/src \
 	$(SPEEX_CFLAGS) \
-	$(OPENSSL_CFLAGS)
+	$(OPENSSL_CFLAGS) \
+	$(OPUS_CFLAGS)
 
 test_libpoc_LDADD = \
 	$(top_builddir)/src/libpoc.la \
 	$(SPEEX_LIBS) \
 	$(OPENSSL_LIBS) \
+	$(OPUS_LIBS) \
 	-lpthread \
 	-lm
+
+check_PROGRAMS += test_integration
+
+test_integration_SOURCES = test_integration.c
+test_integration_CFLAGS = $(test_libpoc_CFLAGS)
+test_integration_LDADD = $(test_libpoc_LDADD)
 
 noinst_PROGRAMS = test_codec_wav
 
@@ -33,4 +41,4 @@ test_codec_wav_SOURCES = test_codec_wav.c
 test_codec_wav_CFLAGS = $(test_libpoc_CFLAGS) -Wno-format-truncation
 test_codec_wav_LDADD = $(test_libpoc_LDADD)
 
-TESTS = test_libpoc
+TESTS = test_libpoc test_integration

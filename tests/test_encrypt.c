@@ -105,4 +105,41 @@ void test_encrypt(void)
         poc_encrypt_destroy(&enc);
         test_assert(!enc.enabled, "should be disabled after destroy");
     }
+
+    /* AES-256 (32-byte key) */
+    {
+        test_begin("encrypt: AES-256 roundtrip");
+        poc_encrypt_t enc256;
+        poc_encrypt_init(&enc256);
+        uint8_t key[32];
+        for (int i = 0; i < 32; i++) key[i] = (uint8_t)(i + 1);
+        poc_encrypt_set_key(&enc256, POC_KEY_TYPE_AES, key, 32);
+
+        uint8_t plaintext[20] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19};
+        uint8_t ciphertext[48], decrypted[48];
+        int elen = poc_encrypt_audio(&enc256, 0, plaintext, 20, ciphertext, sizeof(ciphertext));
+        int dlen = poc_decrypt_audio(&enc256, 0, ciphertext, elen, decrypted, sizeof(decrypted));
+        test_assert(dlen == 20 && memcmp(plaintext, decrypted, 20) == 0,
+                    "AES-256 roundtrip should match");
+        poc_encrypt_destroy(&enc256);
+    }
+
+    /* AES-128 roundtrip (16-byte key, explicit) */
+    {
+        test_begin("encrypt: AES-128 roundtrip (16-byte key)");
+        poc_encrypt_t enc128;
+        poc_encrypt_init(&enc128);
+        uint8_t key[16] = {0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF,
+                           0xFE,0xDC,0xBA,0x98,0x76,0x54,0x32,0x10};
+        poc_encrypt_set_key(&enc128, POC_KEY_TYPE_AES, key, 16);
+
+        uint8_t plaintext[16] = {0xAA,0xBB,0xCC,0xDD,0x11,0x22,0x33,0x44,
+                                 0x55,0x66,0x77,0x88,0x99,0x00,0xEE,0xFF};
+        uint8_t ciphertext[48], decrypted[48];
+        int elen = poc_encrypt_audio(&enc128, 0, plaintext, 16, ciphertext, sizeof(ciphertext));
+        int dlen = poc_decrypt_audio(&enc128, 0, ciphertext, elen, decrypted, sizeof(decrypted));
+        test_assert(dlen == 16 && memcmp(plaintext, decrypted, 16) == 0,
+                    "AES-128 roundtrip should match");
+        poc_encrypt_destroy(&enc128);
+    }
 }

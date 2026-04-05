@@ -1,15 +1,13 @@
 /*
  * poc_encrypt.c — Audio encryption/decryption layer
  *
- * Supports two cipher modes:
- *   Type 0x02: AES-128-ECB
- *   Type 0x06: SM4-ECB (Chinese national standard, via OpenSSL EVP)
+ * AES-ECB encryption (128/192/256 key sizes via OpenSSL EVP).
  *
  * Keys are per-group, delivered in the UserData (0x0B) login response.
  * For private calls, the key is derived from the session.
  *
- * Encryption wraps encoded audio: Speex frame -> encrypt -> UDP send
- * Decryption unwraps on receive: UDP recv -> decrypt -> Speex decode
+ * Encryption wraps encoded audio: codec encode -> encrypt -> UDP send
+ * Decryption unwraps on receive: UDP recv -> decrypt -> codec decode
  */
 
 #include "poc_internal.h"
@@ -97,38 +95,6 @@ static int aes_ecb_crypt(const uint8_t *key, int key_len,
     return out_len + final_len;
 }
 
-/*
- * SM4-ECB encrypt/decrypt (OpenSSL 3.x+ has EVP_sm4_ecb).
- * Falls back to AES if SM4 not available.
- */
-static int sm4_ecb_crypt(const uint8_t *key, int key_len,
-                         const uint8_t *in, int in_len,
-                         uint8_t *out, int encrypt)
-{
-#if OPENSSL_VERSION_NUMBER >= 0x10101000L
-    const EVP_CIPHER *cipher = EVP_sm4_ecb();
-    if (!cipher) {
-        /* SM4 not compiled in — fall back to AES */
-        return aes_ecb_crypt(key, key_len, in, in_len, out, encrypt);
-    }
-
-    EVP_CIPHER_CTX *evp = EVP_CIPHER_CTX_new();
-    if (!evp) return -1;
-
-    EVP_CipherInit_ex(evp, cipher, NULL, key, NULL, encrypt);
-    EVP_CIPHER_CTX_set_padding(evp, 1);
-
-    int out_len = 0, final_len = 0;
-    EVP_CipherUpdate(evp, out, &out_len, in, in_len);
-    EVP_CipherFinal_ex(evp, out + out_len, &final_len);
-    EVP_CIPHER_CTX_free(evp);
-
-    return out_len + final_len;
-#else
-    return aes_ecb_crypt(key, key_len, in, in_len, out, encrypt);
-#endif
-}
-
 int poc_encrypt_audio(poc_encrypt_t *enc, uint32_t group_id,
                       const uint8_t *in, int in_len,
                       uint8_t *out, int out_max)
@@ -160,10 +126,8 @@ int poc_encrypt_audio(poc_encrypt_t *enc, uint32_t group_id,
     if (out_max < padded)
         return -1;
 
-    if (key_type == POC_KEY_TYPE_SM4)
-        return sm4_ecb_crypt(key, key_len, in, in_len, out, 1);
-    else
-        return aes_ecb_crypt(key, key_len, in, in_len, out, 1);
+    (void)key_type;
+    return aes_ecb_crypt(key, key_len, in, in_len, out, 1);
 }
 
 int poc_decrypt_audio(poc_encrypt_t *enc, uint32_t group_id,
@@ -191,8 +155,6 @@ int poc_decrypt_audio(poc_encrypt_t *enc, uint32_t group_id,
     if (key_len == 0 || out_max < in_len)
         return -1;
 
-    if (key_type == POC_KEY_TYPE_SM4)
-        return sm4_ecb_crypt(key, key_len, in, in_len, out, 0);
-    else
-        return aes_ecb_crypt(key, key_len, in, in_len, out, 0);
+    (void)key_type;
+    return aes_ecb_crypt(key, key_len, in, in_len, out, 0);
 }

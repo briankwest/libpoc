@@ -41,6 +41,7 @@ typedef struct {
     const char *name;            /* display name (NULL = use account) */
     const char *password;        /* raw — library SHA1-hashes internally */
     uint32_t    user_id;
+    uint32_t    priority;        /* PTT floor priority (0=normal, higher=more priority) */
 } poc_server_user_t;
 
 /* Group definition — add before or after start */
@@ -66,6 +67,8 @@ typedef struct {
                            uint32_t group_id, void *ud);
     void (*on_ptt_end)(poc_server_t *srv, uint32_t user_id,
                        uint32_t group_id, void *ud);
+    void (*on_ptt_preempted)(poc_server_t *srv, uint32_t old_user_id,
+                             uint32_t new_user_id, uint32_t group_id, void *ud);
 
     /* Messages */
     void (*on_message)(poc_server_t *srv, uint32_t from_id,

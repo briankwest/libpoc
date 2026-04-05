@@ -11,6 +11,7 @@
 #define POC_INTERNAL_H
 
 #include "poc.h"
+#include "poc_codec.h"
 #include "poc_ring.h"
 #include "poc_events.h"
 #include <pthread.h>
@@ -75,10 +76,9 @@
 #define UDP_MAX_PKT       1400
 #define UDP_DEDUP_SLOTS   8
 
-/* ── Speex codec constants ──────────────────────────────────────── */
+/* ── Codec buffer sizing ───────────────────────────────────────── */
 
-#define SPEEX_FRAME_PCM   320   /* bytes (160 samples * 2) */
-#define SPEEX_FRAME_ENC   20    /* bytes encoded (mode 4, narrowband) */
+#define POC_MAX_ENCODED_SIZE  POC_CODEC_MAX_ENCODED_SIZE
 
 /* ── Timeouts ───────────────────────────────────────────────────── */
 
@@ -97,7 +97,6 @@
 /* ── Encryption ─────────────────────────────────────────────────── */
 
 #define POC_KEY_TYPE_AES  0x02
-#define POC_KEY_TYPE_SM4  0x06
 #define POC_ENCRYPT_KEY_LEN 32   /* max key length (AES-256) */
 #define POC_MAX_GROUP_KEYS  32   /* max per-group keys */
 
@@ -105,7 +104,7 @@
 
 #define POC_FEC_DEFAULT_GROUP 3  /* 3 data frames + 1 parity */
 #define POC_FEC_MAX_GROUP     8
-#define POC_FEC_MAX_FRAME    64  /* max encoded frame size */
+#define POC_FEC_MAX_FRAME    1024 /* max encoded frame size */
 
 /* ── GPS ────────────────────────────────────────────────────────── */
 
@@ -125,16 +124,6 @@ typedef enum {
     LOGIN_ONLINE,
     LOGIN_FAILED
 } login_state_t;
-
-/* ── Speex codec state ──────────────────────────────────────────── */
-
-typedef struct {
-    void       *enc_state;
-    void       *dec_state;
-    SpeexBits   enc_bits;
-    SpeexBits   dec_bits;
-    int         frame_size;  /* samples per frame (160) */
-} poc_speex_t;
 
 /* ── Encryption state ───────────────────────────────────────────── */
 
@@ -189,7 +178,7 @@ struct poc_ctx {
     char        password_sha1[41]; /* hex SHA1 of password */
     char        imei[20];
     char        iccid[33];
-    int         codec;
+    int         codec_type;       /* POC_CODEC_* enum */
     int         heartbeat_ms;
 
     /* State (written by I/O thread, read by both) */
@@ -246,7 +235,7 @@ struct poc_ctx {
     int             user_count;
 
     /* Audio codec (I/O thread only — NOT thread-safe) */
-    poc_speex_t     speex;
+    poc_codec_t    *codec;
 
     /* Encryption (I/O thread only) */
     poc_encrypt_t   encrypt;
@@ -327,11 +316,7 @@ const char *poc_notify_name(uint8_t cmd);  /* server→client notification name 
 /* poc_msg_parse.c */
 int         poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len);
 
-/* poc_codec.c */
-int         poc_speex_init(poc_speex_t *s);
-void        poc_speex_destroy(poc_speex_t *s);
-int         poc_speex_encode(poc_speex_t *s, const int16_t *pcm, uint8_t *out);
-int         poc_speex_decode(poc_speex_t *s, const uint8_t *in, int in_len, int16_t *pcm);
+/* poc_codec.c — codec abstraction (see poc_codec.h) */
 
 /* poc_encrypt.c */
 void        poc_encrypt_init(poc_encrypt_t *enc);

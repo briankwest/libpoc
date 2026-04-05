@@ -7,12 +7,14 @@ AM_CFLAGS = \
 	-I$(top_srcdir)/src \
 	-DLIBPOC_GIT_HASH=\"$(GIT_HASH)\" \
 	$(SPEEX_CFLAGS) \
-	$(OPENSSL_CFLAGS)
+	$(OPENSSL_CFLAGS) \
+	$(OPUS_CFLAGS)
 
 LDADD = \
 	$(top_builddir)/src/libpoc.la \
 	$(SPEEX_LIBS) \
 	$(OPENSSL_LIBS) \
+	$(OPUS_LIBS) \
 	-lpthread \
 	-lm
 

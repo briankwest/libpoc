@@ -15,7 +15,9 @@
 #define SRV_MAX_GROUPS    32
 #define SRV_MAX_GROUP_MEM 32
 #define SRV_RECV_BUF      (64 * 1024)
-#define SRV_LOGIN_TIMEOUT_MS 7000
+#define SRV_LOGIN_TIMEOUT_MS   7000
+#define SRV_HEARTBEAT_TIMEOUT_MS 90000   /* 90s — 3x the default 30s interval */
+#define SRV_PTT_FLOOR_TIMEOUT_MS 60000   /* 60s max floor hold without audio */
 
 typedef enum {
     SRV_CLIENT_NEW,
@@ -32,10 +34,13 @@ typedef struct {
     uint8_t             session_id;
     uint32_t            challenge_nonce;
     uint32_t            active_group;
+    uint32_t            priority;             /* copied from user DB on login */
     uint32_t            private_call_target;  /* non-zero = in private call to this user */
     struct sockaddr_in  udp_addr;
     bool                has_udp_addr;
     uint64_t            last_heartbeat;
+    uint64_t            last_audio_time;     /* last UDP audio from this client */
+    int                 codec_type;          /* POC_CODEC_* from PTT start */
     uint64_t            login_time;
 
     uint8_t             recv_buf[SRV_RECV_BUF];
@@ -50,6 +55,7 @@ typedef struct {
     char     name[64];
     char     password_sha1[41];
     uint32_t user_id;
+    uint32_t priority;       /* PTT floor priority (higher = more priority) */
 } srv_user_t;
 
 typedef struct {
@@ -87,7 +93,7 @@ struct poc_server {
     char                tls_key_path[256];
 
     /* Audio codec (I/O thread — decode incoming, encode injected) */
-    poc_speex_t         speex;
+    poc_codec_t        *codec;
     uint16_t            inject_seq;  /* UDP sequence for injected audio */
 
     /* I/O thread */

@@ -145,13 +145,13 @@ int poc_udp_recv(poc_ctx_t *ctx)
         int payload_len = n - UDP_HDR_LEN;
         const uint8_t *payload = pkt + UDP_HDR_LEN;
 
-        /* Decrypt → Decode → push into RX ring (I/O thread context) */
+        /* Decrypt → FEC decode → Codec decode → push into RX ring */
         if (atomic_load(&ctx->ptt_rx_active) && payload_len > 0) {
             const uint8_t *audio_data = payload;
             int audio_len = payload_len;
-            uint8_t decrypted[128];
+            uint8_t decrypted[POC_CODEC_MAX_ENCODED_SIZE + 16];
 
-            /* Decrypt if encryption is enabled */
+            /* Decrypt if encryption is enabled — skip frame on failure */
             if (ctx->encrypt.enabled) {
                 int dlen = poc_decrypt_audio(&ctx->encrypt, ctx->active_group_id,
                                              payload, payload_len,
@@ -159,11 +159,27 @@ int poc_udp_recv(poc_ctx_t *ctx)
                 if (dlen > 0) {
                     audio_data = decrypted;
                     audio_len = dlen;
+                } else {
+                    poc_log_at(POC_LOG_WARNING, "udp: decrypt failed, dropping frame");
+                    continue;
                 }
             }
 
-            int16_t pcm[POC_AUDIO_FRAME_SAMPLES];
-            int decoded = poc_speex_decode(&ctx->speex, audio_data, audio_len, pcm);
+            /* FEC decode: track frames and reconstruct on loss */
+            if (ctx->fec.enabled) {
+                uint8_t fec_out[POC_FEC_MAX_FRAME];
+                int seq_in_group = seq % (ctx->fec.group_size + 1);
+                int fec_len = poc_fec_decode(&ctx->fec, audio_data, audio_len,
+                                              seq_in_group, fec_out, sizeof(fec_out));
+                if (fec_len > 0) {
+                    audio_data = fec_out;
+                    audio_len = fec_len;
+                }
+            }
+
+            int16_t pcm[POC_CODEC_MAX_FRAME_SAMPLES];
+            int decoded = poc_codec_decode(ctx->codec, audio_data, audio_len,
+                                           pcm, POC_CODEC_MAX_FRAME_SAMPLES);
 
             if (decoded > 0) {
                 if (!poc_ring_push(&ctx->rx_ring, pcm, decoded,

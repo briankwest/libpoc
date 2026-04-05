@@ -13,6 +13,13 @@ AC_PROG_INSTALL
 PKG_CHECK_MODULES([SPEEX], [speex], [], [AC_MSG_ERROR([libspeex is required])])
 PKG_CHECK_MODULES([OPENSSL], [openssl], [], [AC_MSG_ERROR([openssl is required])])
 
+dnl Opus is optional — auto-detected, graceful fallback if absent
+PKG_CHECK_MODULES([OPUS], [opus], [have_opus=yes], [have_opus=no])
+AM_CONDITIONAL([HAVE_OPUS], [test "x$have_opus" = "xyes"])
+if test "x$have_opus" = "xyes"; then
+  AC_DEFINE([HAVE_OPUS], [1], [Have libopus])
+fi
+
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_FILES([
     Makefile

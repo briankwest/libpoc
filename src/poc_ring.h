@@ -2,8 +2,8 @@
  * poc_ring.h — Lock-free SPSC ring buffer for audio frames
  *
  * Single-producer, single-consumer. No locks. Uses C11 atomics.
- * Each slot holds one 20ms audio frame (160 int16 samples = 320 bytes)
- * plus metadata (speaker_id, group_id).
+ * Each slot holds one 20ms audio frame (up to 960 samples at 48kHz)
+ * plus metadata (speaker_id, group_id, n_samples).
  */
 
 #ifndef POC_RING_H
@@ -14,11 +14,13 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include "poc_codec.h"
 
-#define POC_RING_FRAME_SAMPLES  160
+#define POC_RING_MAX_FRAME_SAMPLES  POC_CODEC_MAX_FRAME_SAMPLES
 
 typedef struct {
-    int16_t  samples[POC_RING_FRAME_SAMPLES];
+    int16_t  samples[POC_RING_MAX_FRAME_SAMPLES];
+    int      n_samples;
     uint32_t speaker_id;
     uint32_t group_id;
 } poc_ring_frame_t;
@@ -82,10 +84,11 @@ static inline bool poc_ring_push(poc_ring_t *r,
     unsigned idx = atomic_load_explicit(&r->head, memory_order_relaxed) & r->mask;
     poc_ring_frame_t *f = &r->buf[idx];
 
-    int copy = n_samples < POC_RING_FRAME_SAMPLES ? n_samples : POC_RING_FRAME_SAMPLES;
+    int copy = n_samples < POC_RING_MAX_FRAME_SAMPLES ? n_samples : POC_RING_MAX_FRAME_SAMPLES;
     memcpy(f->samples, samples, copy * sizeof(int16_t));
-    if (copy < POC_RING_FRAME_SAMPLES)
-        memset(f->samples + copy, 0, (POC_RING_FRAME_SAMPLES - copy) * sizeof(int16_t));
+    if (copy < POC_RING_MAX_FRAME_SAMPLES)
+        memset(f->samples + copy, 0, (POC_RING_MAX_FRAME_SAMPLES - copy) * sizeof(int16_t));
+    f->n_samples = copy;
 
     f->speaker_id = speaker_id;
     f->group_id = group_id;

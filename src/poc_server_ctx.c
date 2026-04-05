@@ -126,13 +126,25 @@ static void srv_disconnect(poc_server_t *srv, int idx)
 
     if (cl->state == SRV_CLIENT_ONLINE) {
         srv_status_broadcast(srv, cl->user_id, 0, cl->fd);
+
+        /* Fire on_group_leave if client was in a group */
+        if (cl->active_group && srv->cb.on_group_leave)
+            srv->cb.on_group_leave(srv, cl->user_id, cl->active_group, srv->cb.userdata);
+
+        /* Clear private_call_target on any client that was in a call with us */
+        if (cl->user_id) {
+            for (int i = 0; i < srv->client_count; i++) {
+                if (i != idx && srv->clients[i].private_call_target == cl->user_id)
+                    srv->clients[i].private_call_target = 0;
+            }
+        }
+
         /* Release floor */
         for (int i = 0; i < srv->group_count; i++)
             if (srv->groups[i].floor_holder == idx) srv->groups[i].floor_holder = -1;
+
         /* Push disconnect event */
-        poc_event_t evt = { .type = POC_EVT_USER_STATUS,
-                            .user_status = { .user_id = cl->user_id, .status = 0 }};
-        snprintf(evt.user_status.user_id ? (char[1]){0} : (char[1]){0}, 0, ""); /* just for the union */
+        poc_event_t evt = { .type = POC_EVT_USER_STATUS };
         evt.user_status.user_id = cl->user_id;
         evt.user_status.status = -1; /* disconnected */
         poc_evt_push(&srv->evt_queue, &evt);
@@ -212,7 +224,15 @@ static void srv_handle_validate(poc_server_t *srv, srv_client_t *cl, const uint8
 
     cl->state = SRV_CLIENT_ONLINE;
     cl->last_heartbeat = poc_mono_ms();
-    poc_log_at(POC_LOG_INFO, "srv: %s authenticated — now online (user %u)", cl->account, cl->user_id);
+    /* Copy priority from user DB */
+    for (int i = 0; i < srv->user_count; i++) {
+        if (srv->users[i].user_id == cl->user_id) {
+            cl->priority = srv->users[i].priority;
+            break;
+        }
+    }
+    poc_log_at(POC_LOG_INFO, "srv: %s authenticated — now online (user %u, priority %u)",
+               cl->account, cl->user_id, cl->priority);
 
     /* Broadcast online status */
     srv_status_broadcast(srv, cl->user_id, 1, cl->fd);
@@ -296,20 +316,32 @@ static void srv_handle_enter_group(poc_server_t *srv, srv_client_t *cl, const ui
     poc_write32(notify + off, gid); off += 4;
     srv_broadcast_group(srv, gid, notify, off, cl->fd);
 
-    poc_event_t evt = { .type = POC_EVT_GROUPS_UPDATED };
-    poc_evt_push(&srv->evt_queue, &evt);
+    if (srv->cb.on_group_enter)
+        srv->cb.on_group_enter(srv, cl->user_id, gid, srv->cb.userdata);
 }
 
 static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx,
                                  const uint8_t *data, int len)
 {
+    /* Record codec type from PTT start (byte 6) */
+    if (len > 6)
+        cl->codec_type = data[6];
+
     /* Check for private call: poc_call_user sends exactly 13 bytes with
      * target user ID at bytes 9-12. Group PTT sends 9+name_len bytes
-     * with the account name at bytes 9+. Distinguish by length: private
-     * calls are exactly 13 bytes, group PTT is longer (has name). */
+     * with the account name at bytes 9+. When len==13, disambiguate by
+     * checking if the 4-byte value is a known registered user. */
     uint32_t target_uid = 0;
-    if (len == 13)
-        target_uid = poc_read32(data + 9);
+    if (len == 13) {
+        uint32_t maybe_uid = poc_read32(data + 9);
+        /* Only treat as private call if it's a registered user */
+        for (int i = 0; i < srv->user_count; i++) {
+            if (srv->users[i].user_id == maybe_uid) {
+                target_uid = maybe_uid;
+                break;
+            }
+        }
+    }
 
     if (target_uid != 0 && target_uid != cl->user_id) {
         /* ── Private call ── */
@@ -353,12 +385,44 @@ static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx
     int gidx = srv_find_group_idx(srv, cl->active_group);
     if (gidx < 0) return;
 
-    /* Floor check */
+    /* Floor check with priority-based pre-emption:
+     *   - Floor free → grant
+     *   - Floor held by self → grant (re-key)
+     *   - Floor held by lower-priority user → pre-empt and grant
+     *   - Floor held by equal/higher-priority user → deny */
     bool grant = true;
-    if (srv->groups[gidx].floor_holder >= 0 && srv->groups[gidx].floor_holder != cl_idx)
-        grant = false;
+    int old_holder = srv->groups[gidx].floor_holder;
+    bool preempted = false;
 
-    /* Ask application callback */
+    if (old_holder >= 0 && old_holder != cl_idx) {
+        srv_client_t *holder = &srv->clients[old_holder];
+        if (cl->priority > holder->priority) {
+            /* Pre-empt: force-end the current holder's PTT */
+            preempted = true;
+            poc_log_at(POC_LOG_INFO, "srv: %s (pri %u) pre-empting %s (pri %u) on group %u",
+                       cl->account, cl->priority, holder->account, holder->priority,
+                       cl->active_group);
+
+            /* Send END_PTT to old holder */
+            uint8_t end_notify[8];
+            int eoff = 0;
+            end_notify[eoff++] = 0;
+            end_notify[eoff++] = POC_NOTIFY_END_PTT_PRI;
+            poc_write32(end_notify + eoff, holder->user_id); eoff += 4;
+            srv_send_frame(holder, end_notify, eoff);
+            srv_broadcast_group(srv, cl->active_group, end_notify, eoff, holder->fd);
+
+            if (srv->cb.on_ptt_preempted)
+                srv->cb.on_ptt_preempted(srv, holder->user_id, cl->user_id,
+                                         cl->active_group, srv->cb.userdata);
+            if (srv->cb.on_ptt_end)
+                srv->cb.on_ptt_end(srv, holder->user_id, cl->active_group, srv->cb.userdata);
+        } else {
+            grant = false;
+        }
+    }
+
+    /* Ask application callback (can still deny even if priority allows) */
     if (grant && srv->cb.on_ptt_request)
         grant = srv->cb.on_ptt_request(srv, cl->user_id, cl->active_group, srv->cb.userdata);
 
@@ -368,6 +432,7 @@ static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx
 
     if (grant) {
         srv->groups[gidx].floor_holder = cl_idx;
+        cl->last_audio_time = poc_mono_ms();  /* start floor timeout clock */
         poc_log_at(POC_LOG_INFO, "srv: %s granted PTT on group %u", cl->account, cl->active_group);
 
         /* Look up display name */
@@ -696,6 +761,7 @@ static void srv_handle_udp(poc_server_t *srv)
             sender = &srv->clients[i];
             sender->udp_addr = from;
             sender->has_udp_addr = true;
+            sender->last_audio_time = poc_mono_ms();
             break;
         }
     }
@@ -729,12 +795,14 @@ static void srv_handle_udp(poc_server_t *srv)
     if (srv->cb.on_audio && n > POC_UDP_HDR_LEN) {
         const uint8_t *encoded = pkt + POC_UDP_HDR_LEN;
         int enc_len = n - POC_UDP_HDR_LEN;
-        int16_t pcm[160];
-        int decoded = poc_speex_decode(&srv->speex, encoded, enc_len, pcm);
+        int16_t pcm[POC_CODEC_MAX_FRAME_SAMPLES];
+        int decoded = poc_codec_decode(srv->codec, encoded, enc_len,
+                                       pcm, POC_CODEC_MAX_FRAME_SAMPLES);
         if (decoded > 0) {
             poc_event_t evt = { .type = POC_EVT_AUDIO };
             evt.audio.speaker_id = sender_id;
             evt.audio.group_id = sender->active_group;
+            evt.audio.n_samples = decoded;
             memcpy(evt.audio.pcm, pcm, decoded * sizeof(int16_t));
             poc_evt_push(&srv->evt_queue, &evt);
         }
@@ -832,6 +900,38 @@ static void *srv_io_thread(void *arg)
                 if (srv_tcp_recv(srv, i) < 0) { srv_disconnect(srv, i); i--; }
             }
         }
+
+        /* Stale client heartbeat timeout + PTT floor timeout */
+        uint64_t now = poc_mono_ms();
+        for (int i = 0; i < srv->client_count; i++) {
+            srv_client_t *cl = &srv->clients[i];
+            if (cl->state != SRV_CLIENT_ONLINE) continue;
+            if (cl->last_heartbeat > 0 &&
+                now - cl->last_heartbeat > SRV_HEARTBEAT_TIMEOUT_MS) {
+                poc_log_at(POC_LOG_WARNING, "srv: %s (user %u) heartbeat timeout — disconnecting",
+                           cl->account, cl->user_id);
+                srv_disconnect(srv, i);
+                i--;
+                continue;
+            }
+        }
+        /* Release floors held too long without audio */
+        for (int g = 0; g < srv->group_count; g++) {
+            int holder = srv->groups[g].floor_holder;
+            if (holder < 0 || holder >= srv->client_count) continue;
+            srv_client_t *cl = &srv->clients[holder];
+            if (cl->last_audio_time > 0 &&
+                now - cl->last_audio_time > SRV_PTT_FLOOR_TIMEOUT_MS) {
+                poc_log_at(POC_LOG_WARNING, "srv: floor timeout on group %u — releasing %s",
+                           srv->groups[g].id, cl->account);
+                srv->groups[g].floor_holder = -1;
+                /* Notify group */
+                uint8_t notify[8] = {0};
+                notify[1] = POC_NOTIFY_END_PTT_PRI;
+                poc_write32(notify + 2, cl->user_id);
+                srv_broadcast_group(srv, srv->groups[g].id, notify, 6, -1);
+            }
+        }
     }
 
     poc_log_at(POC_LOG_INFO, "srv: I/O thread exiting");
@@ -867,8 +967,9 @@ poc_server_t *poc_server_create(const poc_server_config_t *cfg,
     if (cfg && cfg->tls_key_path)
         snprintf(srv->tls_key_path, sizeof(srv->tls_key_path), "%s", cfg->tls_key_path);
 
-    /* Speex codec for audio decode/encode */
-    poc_speex_init(&srv->speex);
+    /* Audio codec for decode/encode (default: Speex NB) */
+    srv->codec = poc_codec_create(POC_CODEC_SPEEX_NB);
+    if (!srv->codec) { free(srv); return NULL; }
 
     if (cb) srv->cb = *cb;
     return srv;
@@ -878,7 +979,7 @@ void poc_server_destroy(poc_server_t *srv)
 {
     if (!srv) return;
     poc_server_stop(srv);
-    poc_speex_destroy(&srv->speex);
+    poc_codec_destroy(srv->codec);
     if (srv->ssl_ctx) { SSL_CTX_free(srv->ssl_ctx); srv->ssl_ctx = NULL; }
     free(srv);
 }
@@ -891,6 +992,7 @@ int poc_server_add_user(poc_server_t *srv, const poc_server_user_t *user)
     snprintf(u->name, sizeof(u->name), "%s", user->name ? user->name : user->account);
     srv_sha1_hex(user->password, u->password_sha1);
     u->user_id = user->user_id;
+    u->priority = user->priority;
     return POC_OK;
 }
 
@@ -901,9 +1003,13 @@ int poc_server_add_group(poc_server_t *srv, const poc_server_group_t *group)
     g->id = group->id;
     snprintf(g->name, sizeof(g->name), "%s", group->name);
     g->floor_holder = -1;
-    int n = group->member_count < SRV_MAX_GROUP_MEM ? group->member_count : SRV_MAX_GROUP_MEM;
-    for (int i = 0; i < n; i++) g->members[i] = group->member_ids[i];
-    g->member_count = n;
+    if (group->member_ids && group->member_count > 0) {
+        int n = group->member_count < SRV_MAX_GROUP_MEM ? group->member_count : SRV_MAX_GROUP_MEM;
+        for (int i = 0; i < n; i++) g->members[i] = group->member_ids[i];
+        g->member_count = n;
+    } else {
+        g->member_count = 0;  /* open group — all users allowed */
+    }
     return POC_OK;
 }
 
@@ -1042,7 +1148,7 @@ int poc_server_poll(poc_server_t *srv, int timeout_ms)
         case POC_EVT_AUDIO:
             if (srv->cb.on_audio)
                 srv->cb.on_audio(srv, evt.audio.speaker_id, evt.audio.group_id,
-                                 evt.audio.pcm, 160, srv->cb.userdata);
+                                 evt.audio.pcm, evt.audio.n_samples, srv->cb.userdata);
             break;
         default:
             break;
@@ -1059,13 +1165,14 @@ int poc_server_inject_audio(poc_server_t *srv, uint32_t group_id,
 {
     if (!srv || !pcm || n_samples <= 0) return POC_ERR;
 
-    /* Encode PCM → Speex */
-    uint8_t encoded[SPEEX_FRAME_ENC];
-    int enc_len = poc_speex_encode(&srv->speex, pcm, encoded);
+    /* Encode PCM → codec */
+    uint8_t encoded[POC_CODEC_MAX_ENCODED_SIZE];
+    int enc_len = poc_codec_encode(srv->codec, pcm, n_samples,
+                                   encoded, sizeof(encoded));
     if (enc_len <= 0) return POC_ERR;
 
     /* Build UDP packet: [seq(2)][sender(4)][pad(1)][type(1)][payload] */
-    uint8_t pkt[POC_UDP_HDR_LEN + SPEEX_FRAME_ENC];
+    uint8_t pkt[POC_UDP_HDR_LEN + POC_CODEC_MAX_ENCODED_SIZE];
     poc_write16(pkt, srv->inject_seq++);
     poc_write32(pkt + 2, virtual_user_id);
     pkt[6] = 0;     /* pad */

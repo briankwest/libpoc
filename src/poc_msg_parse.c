@@ -262,10 +262,20 @@ static void handle_challenge(poc_ctx_t *ctx, const uint8_t *data, int len)
         poc_log_at(POC_LOG_DEBUG, "login: received auth challenge");
     }
 
-    if (len >= 11) {
+    if (len >= 12) {
         uint16_t key_type = poc_read16(data + 9);
         poc_log_at(POC_LOG_DEBUG, "login: encryption=%s gps=%s",
-                key_type ? "yes" : "none", data[11] ? "required" : "off");
+                key_type ? "yes" : "none", (len > 11 && data[11]) ? "required" : "off");
+
+        /* Extract session encryption key if present.
+         * Some servers embed the key after the GPS flag: [12..12+key_len] */
+        if (key_type == POC_KEY_TYPE_AES && len >= 28) {
+            /* 16-byte AES key at offset 12 */
+            poc_encrypt_set_key(&ctx->encrypt, POC_KEY_TYPE_AES, data + 12, 16);
+            poc_log("login: session AES key set from challenge");
+        }
+    } else if (len >= 11) {
+        poc_log_at(POC_LOG_DEBUG, "login: encryption=none gps=off");
     }
 
     /* Send validate response */
@@ -370,6 +380,13 @@ static void handle_user_data(poc_ctx_t *ctx, const uint8_t *data, int len)
     atomic_store(&ctx->state, POC_STATE_ONLINE);
     ctx->login_retries = 0;
 
+    /* Send a UDP registration packet so the server learns our address.
+     * Without this, listeners can't receive relayed audio. */
+    {
+        uint8_t ping = 0;
+        poc_udp_send(ctx, &ping, 1);
+    }
+
     /* Parse group list: [0-1] count (big-endian), then per group:
      * [4 bytes] group_id, [1 byte] name_len, [N bytes] name */
     int off = 0;
@@ -423,6 +440,22 @@ static void handle_user_data(poc_ctx_t *ctx, const uint8_t *data, int len)
             ctx->user_count++;
         }
         poc_log("login: %d users in directory", ctx->user_count);
+    }
+
+    /* Parse per-group encryption keys (appended after user directory).
+     * Format: [gcount(2)] + per group: [gid(4)][key_type(1)][key_len(1)][key(N)] */
+    if (off + 2 <= len) {
+        int gkcount = poc_read16(data + off); off += 2;
+        for (int i = 0; i < gkcount && off + 6 <= len; i++) {
+            uint32_t gid = poc_read32(data + off); off += 4;
+            uint8_t ktype = data[off]; off++;
+            int klen = data[off]; off++;
+            if (klen > 0 && off + klen <= len && ktype == POC_KEY_TYPE_AES) {
+                poc_encrypt_set_group_key(&ctx->encrypt, gid, ktype, data + off, klen);
+                poc_log("login: group %u AES key set (%d bytes)", gid, klen);
+            }
+            off += klen;
+        }
     }
 
     /* Fire state change */

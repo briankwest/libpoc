@@ -19,7 +19,7 @@ jobs:
             build-essential pkg-config \
             autoconf automake libtool \
             devscripts debhelper fakeroot dh-autoreconf \
-            libspeex-dev libssl-dev
+            libspeex-dev libssl-dev libopus-dev
 
       - name: Bootstrap autotools
         run: bash autogen.sh

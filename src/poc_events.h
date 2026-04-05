@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include "poc_codec.h"
 
 typedef enum {
     POC_EVT_STATE_CHANGE,
@@ -58,7 +59,8 @@ typedef struct {
         struct { uint32_t user_id; } msg_read;
         struct { uint32_t user_id; bool typing; } typing;
         struct { uint32_t speaker_id; uint32_t group_id;
-                 int16_t pcm[160]; } audio;
+                 int n_samples;
+                 int16_t pcm[POC_CODEC_MAX_FRAME_SAMPLES]; } audio;
     };
 } poc_event_t;
 

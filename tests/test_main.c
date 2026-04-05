@@ -81,10 +81,10 @@ int main(void)
     printf("\nMessage parser dispatch:\n");
     test_msg_parse();
 
-    printf("\nSpeex codec:\n");
+    printf("\nAudio codecs (Speex NB/WB/UWB, PCMU, PCMA):\n");
     test_codec();
 
-    printf("\nEncryption (AES/SM4):\n");
+    printf("\nEncryption (AES):\n");
     test_encrypt();
 
     printf("\nGPS reporting:\n");

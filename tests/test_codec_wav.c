@@ -108,19 +108,21 @@ int main(int argc, char **argv)
         int frames = (n8k / POC_AUDIO_FRAME_SAMPLES) * POC_AUDIO_FRAME_SAMPLES;
         if (frames == 0) { printf("  (too short)\n"); free(wav.samples); if (need_free) free(pcm8k); continue; }
 
-        poc_speex_t spx;
-        poc_speex_init(&spx);
+        poc_codec_t *spx = poc_codec_create(POC_CODEC_SPEEX_NB);
         int16_t *out = calloc(frames, sizeof(int16_t));
         int out_n = 0;
         for (int f = 0; f < frames / POC_AUDIO_FRAME_SAMPLES; f++) {
-            uint8_t enc[SPEEX_FRAME_ENC];
-            int el = poc_speex_encode(&spx, pcm8k + f * POC_AUDIO_FRAME_SAMPLES, enc);
+            uint8_t enc[POC_CODEC_MAX_ENCODED_SIZE];
+            int el = poc_codec_encode(spx, pcm8k + f * POC_AUDIO_FRAME_SAMPLES,
+                                      POC_AUDIO_FRAME_SAMPLES, enc, sizeof(enc));
             if (el > 0) {
-                int dl = poc_speex_decode(&spx, enc, el, out + f * POC_AUDIO_FRAME_SAMPLES);
+                int dl = poc_codec_decode(spx, enc, el,
+                                          out + f * POC_AUDIO_FRAME_SAMPLES,
+                                          POC_AUDIO_FRAME_SAMPLES);
                 if (dl > 0) out_n += dl;
             }
         }
-        poc_speex_destroy(&spx);
+        poc_codec_destroy(spx);
 
         char outpath[1024];
         snprintf(outpath, sizeof(outpath), "%s/%s", speex_dir, ent->d_name);

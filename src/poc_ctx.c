@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <poll.h>
 #include <errno.h>
+#include <math.h>
 
 /* Forward declaration */
 static int locked_tcp_send(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len);
@@ -30,24 +31,28 @@ static void io_drain_tx(poc_ctx_t *ctx)
     int drained = 0;
     while (poc_ring_pop(&ctx->tx_ring, &frame)) {
         drained++;
-        uint8_t encoded[SPEEX_FRAME_ENC];
-        int enc_len = poc_speex_encode(&ctx->speex, frame.samples, encoded);
+        uint8_t encoded[POC_CODEC_MAX_ENCODED_SIZE];
+        int enc_len = poc_codec_encode(ctx->codec, frame.samples,
+                                       frame.n_samples, encoded, sizeof(encoded));
         if (enc_len <= 0) {
             poc_log_at(POC_LOG_WARNING, "speex encode failed: %d", enc_len);
             continue;
         }
 
-        uint8_t send_buf[128];
+        uint8_t send_buf[POC_CODEC_MAX_ENCODED_SIZE + 16];
         int send_len = enc_len;
         const uint8_t *send_data = encoded;
 
-        /* Encrypt if enabled */
+        /* Encrypt if enabled — drop frame on failure (never send plaintext) */
         if (ctx->encrypt.enabled) {
             int elen = poc_encrypt_audio(&ctx->encrypt, ctx->active_group_id,
                                          encoded, enc_len, send_buf, sizeof(send_buf));
             if (elen > 0) {
                 send_data = send_buf;
                 send_len = elen;
+            } else {
+                poc_log_at(POC_LOG_ERROR, "encrypt failed, dropping frame");
+                continue;
             }
         }
 
@@ -336,7 +341,7 @@ poc_ctx_t *poc_create(const poc_config_t *cfg, const poc_callbacks_t *cb)
     if (cfg->iccid)
         snprintf(ctx->iccid, sizeof(ctx->iccid), "%s", cfg->iccid);
 
-    ctx->codec = cfg->codec;
+    ctx->codec_type = cfg->codec;
     ctx->heartbeat_ms = cfg->heartbeat_ms > 0 ? cfg->heartbeat_ms : HEARTBEAT_DEFAULT_MS;
 
     /* TLS */
@@ -362,12 +367,22 @@ poc_ctx_t *poc_create(const poc_config_t *cfg, const poc_callbacks_t *cb)
         ctx->cb = *cb;
 
     /* Init rings and event queue */
-    poc_ring_init(&ctx->rx_ring, RX_RING_FRAMES);
-    poc_ring_init(&ctx->tx_ring, TX_RING_FRAMES);
+    int rx_frames = cfg->rx_ring_frames > 0 ? cfg->rx_ring_frames : RX_RING_FRAMES;
+    int tx_frames = cfg->tx_ring_frames > 0 ? cfg->tx_ring_frames : TX_RING_FRAMES;
+    poc_ring_init(&ctx->rx_ring, rx_frames);
+    poc_ring_init(&ctx->tx_ring, tx_frames);
     poc_evt_init(&ctx->evt_queue);
 
     /* Init codec */
-    poc_speex_init(&ctx->speex);
+    ctx->codec = poc_codec_create(ctx->codec_type);
+    if (!ctx->codec) {
+        poc_log_at(POC_LOG_ERROR, "unsupported codec type %d", ctx->codec_type);
+        poc_ring_destroy(&ctx->rx_ring);
+        poc_ring_destroy(&ctx->tx_ring);
+        pthread_mutex_destroy(&ctx->sig_mutex);
+        free(ctx);
+        return NULL;
+    }
 
     /* Init encryption */
     poc_encrypt_init(&ctx->encrypt);
@@ -390,7 +405,7 @@ void poc_destroy(poc_ctx_t *ctx)
 {
     if (!ctx) return;
     poc_disconnect(ctx);
-    poc_speex_destroy(&ctx->speex);
+    poc_codec_destroy(ctx->codec);
     poc_encrypt_destroy(&ctx->encrypt);
     poc_fec_destroy(&ctx->fec);
     poc_ring_destroy(&ctx->rx_ring);
@@ -639,12 +654,21 @@ int poc_poll(poc_ctx_t *ctx, int timeout_ms)
         if (ctx->cb.on_audio_frame) {
             poc_audio_frame_t af = {
                 .samples = frame.samples,
-                .n_samples = POC_AUDIO_FRAME_SAMPLES,
-                .sample_rate = POC_AUDIO_RATE,
+                .n_samples = frame.n_samples,
+                .sample_rate = ctx->codec->sample_rate,
                 .speaker_id = frame.speaker_id,
                 .group_id = frame.group_id,
             };
             ctx->cb.on_audio_frame(ctx, &af, ctx->cb.userdata);
+        }
+        /* Audio level metering */
+        if (ctx->cb.on_audio_level && frame.n_samples > 0) {
+            double sum_sq = 0;
+            for (int i = 0; i < frame.n_samples; i++)
+                sum_sq += (double)frame.samples[i] * frame.samples[i];
+            double rms = sqrt(sum_sq / frame.n_samples);
+            float rms_db = (rms > 0) ? (float)(20.0 * log10(rms / 32768.0)) : -96.0f;
+            ctx->cb.on_audio_level(ctx, frame.speaker_id, rms_db, ctx->cb.userdata);
         }
     }
 
@@ -708,10 +732,13 @@ int poc_ptt_start(poc_ctx_t *ctx)
     int len = poc_build_start_ptt(ctx, buf, sizeof(buf));
     if (len < 0) return len;
 
+    /* Flush stale audio before sending PTT start to prevent
+     * cross-session audio leakage. */
+    poc_ring_flush(&ctx->tx_ring);
+    atomic_store(&g_tx_drop_count, 0);
+
     int rc = locked_tcp_send(ctx, buf, len);
     if (rc == POC_OK) {
-        poc_ring_flush(&ctx->tx_ring);
-        atomic_store(&g_tx_drop_count, 0);
         atomic_store(&ctx->ptt_active, true);
         poc_log("PTT start: tx_ring flushed, ring cap=%d", ctx->tx_ring.capacity);
     }
@@ -748,10 +775,11 @@ int poc_ptt_send_audio(poc_ctx_t *ctx, const int16_t *pcm, int n_samples)
         return POC_ERR_STATE;
     }
 
+    int frame_samples = ctx->codec->frame_samples;
     int offset = 0;
-    while (offset + POC_AUDIO_FRAME_SAMPLES <= n_samples) {
+    while (offset + frame_samples <= n_samples) {
         if (!poc_ring_push(&ctx->tx_ring, pcm + offset,
-                           POC_AUDIO_FRAME_SAMPLES, 0, 0)) {
+                           frame_samples, 0, 0)) {
             int drops = atomic_fetch_add(&g_tx_drop_count, 1);
             if (drops == 0 || (drops % 50) == 0)
                 poc_log_at(POC_LOG_WARNING,
@@ -762,7 +790,7 @@ int poc_ptt_send_audio(poc_ctx_t *ctx, const int16_t *pcm, int n_samples)
                            ctx->tx_ring.capacity);
             break;
         }
-        offset += POC_AUDIO_FRAME_SAMPLES;
+        offset += frame_samples;
     }
 
     /* Nudge I/O thread to drain */
@@ -807,7 +835,7 @@ int poc_call_user(poc_ctx_t *ctx, uint32_t user_id)
     buf[0] = ctx->session_id;
     poc_write32(buf + 1, ctx->user_id);
     buf[5] = CMD_START_PTT;
-    buf[6] = 0;  /* Speex codec */
+    buf[6] = (uint8_t)ctx->codec_type;
     poc_write16(buf + 7, 0x0000);
     poc_write32(buf + 9, user_id);
     int rc = poc_tcp_send_frame(ctx, buf, 13); pthread_mutex_unlock(&ctx->sig_mutex);

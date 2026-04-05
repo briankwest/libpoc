@@ -180,7 +180,7 @@ void test_msg_build(void)
         test_begin("start_ptt: codec byte for speex is 0");
         poc_ctx_t *ctx = make_ctx();
         ctx->user_id = 42;
-        ctx->codec = POC_CODEC_SPEEX;
+        ctx->codec_type = POC_CODEC_SPEEX;
         uint8_t buf[64];
         poc_build_start_ptt(ctx, buf, sizeof(buf));
         test_assert(buf[6] == 0, "speex = 0");
@@ -191,7 +191,7 @@ void test_msg_build(void)
         test_begin("start_ptt: codec byte for speex is 0 (explicit)");
         poc_ctx_t *ctx = make_ctx();
         ctx->user_id = 42;
-        ctx->codec = POC_CODEC_SPEEX;
+        ctx->codec_type = POC_CODEC_SPEEX;
         uint8_t buf[64];
         poc_build_start_ptt(ctx, buf, sizeof(buf));
         test_assert(buf[6] == 0, "speex = 0");
@@ -228,6 +228,43 @@ void test_msg_build(void)
         uint8_t buf[4];
         int len = poc_build_heartbeat(ctx, buf, sizeof(buf));
         test_assert(len == POC_ERR, "should fail");
+        free(ctx);
+    }
+
+    /* Leave group */
+    {
+        test_begin("leave_group: cmd byte is 0x17, length 6");
+        poc_ctx_t *ctx = make_ctx();
+        ctx->user_id = 42;
+        uint8_t buf[16];
+        int len = poc_build_leave_group(ctx, buf, sizeof(buf));
+        test_assert(len == 6 && buf[5] == 0x17, "cmd 0x17, len 6");
+        free(ctx);
+    }
+
+    /* Send user message */
+    {
+        test_begin("send_user_msg: cmd 0x43, target at offset 6");
+        poc_ctx_t *ctx = make_ctx();
+        ctx->user_id = 1;
+        uint8_t buf[256];
+        int len = poc_build_send_user_msg(ctx, 999, "hello", buf, sizeof(buf));
+        test_assert(len > 10 && buf[5] == CMD_NOTIFY_EXT_DATA, "cmd 0x43");
+        test_assert(poc_read32(buf + 6) == 999, "target_id");
+        test_assert(memcmp(buf + 10, "hello", 5) == 0, "text at offset 10");
+        free(ctx);
+    }
+
+    /* Send group message */
+    {
+        test_begin("send_group_msg: cmd 0x43, group at offset 6");
+        poc_ctx_t *ctx = make_ctx();
+        ctx->user_id = 1;
+        uint8_t buf[256];
+        int len = poc_build_send_group_msg(ctx, 500, "test", buf, sizeof(buf));
+        test_assert(len > 10 && buf[5] == CMD_NOTIFY_EXT_DATA, "cmd 0x43");
+        test_assert(poc_read32(buf + 6) == 500, "group_id");
+        test_assert(memcmp(buf + 10, "test", 4) == 0, "text at offset 10");
         free(ctx);
     }
 }
