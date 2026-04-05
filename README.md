@@ -56,6 +56,14 @@ C11/POSIX, callback-driven, threaded I/O. Dependencies: libspeex, OpenSSL, pthre
   - [Server PTT Floor State](#server-ptt-floor-state-per-group)
   - [Server Group Membership](#server-group-membership)
 - [Forward Error Correction](#forward-error-correction)
+- [Application Patterns](#application-patterns)
+  - [Offline Message Store and Forward](#offline-message-store-and-forward)
+  - [Delivery and Read Receipts](#delivery-and-read-receipts)
+  - [Typing Indicators](#typing-indicators)
+  - [Audio Bridging (Gateway / Repeater)](#audio-bridging-gateway--repeater)
+  - [Dispatch Console](#dispatch-console)
+  - [SOS / Emergency Handling](#sos--emergency-handling)
+  - [Presence and Status](#presence-and-status)
 - [Protocol Overview](#protocol-overview)
 - [Test Suite](#test-suite)
 - [Example Programs](#example-programs)
@@ -1454,6 +1462,233 @@ When `enable_fec` is set in the config, the library wraps encoded audio with XOR
 - FEC adds ~33% bandwidth overhead (3 data + 1 parity = 4 packets per 3 audio frames)
 
 FEC is applied after codec encoding and encryption, before UDP transmission.
+
+## Application Patterns
+
+The library provides protocol primitives — the application decides policy. These patterns show how to compose the API for common use cases.
+
+### Offline Message Store and Forward
+
+libpoc does not persist messages. If the target user is offline when a message arrives, the server's `on_message` callback fires with the target's user ID. The application decides whether to store and forward:
+
+```c
+void on_srv_message(poc_server_t *srv, uint32_t from_id,
+                    uint32_t target_id, const char *text, void *ud)
+{
+    app_state_t *app = (app_state_t *)ud;
+
+    if (poc_server_is_user_online(srv, target_id)) {
+        /* User is online -- library already relayed the message.
+         * Send delivery receipt back to sender. */
+        poc_server_send_message(srv, target_id, from_id, "\xFC");  /* 0xFC = delivered */
+    } else {
+        /* User is offline -- store for later delivery. */
+        db_store_message(app->db, from_id, target_id, text, time(NULL));
+
+        /* Optionally notify sender that delivery is pending. */
+        poc_server_send_message(srv, 0, from_id, "User offline, message queued");
+    }
+}
+```
+
+When the offline user reconnects, drain the stored messages:
+
+```c
+void on_srv_connect(poc_server_t *srv, uint32_t user_id,
+                    const char *account, void *ud)
+{
+    app_state_t *app = (app_state_t *)ud;
+
+    /* Deliver stored messages */
+    msg_t *msgs; int count;
+    db_get_pending(app->db, user_id, &msgs, &count);
+
+    for (int i = 0; i < count; i++) {
+        poc_server_send_message(srv, msgs[i].from_id, user_id, msgs[i].text);
+        db_mark_delivered(app->db, msgs[i].id);
+    }
+    free(msgs);
+}
+```
+
+### Delivery and Read Receipts
+
+The receipt flow is:
+
+```
+Sender                    Server                    Recipient
+  |                         |                          |
+  |-- send_user_msg ------->|                          |
+  |                         |-- relay (on_message) --->|
+  |                         |                          |
+  |                         |<-- (auto) 0xFC ----------|  delivery receipt
+  |<-- on_msg_delivered ----|                          |
+  |                         |                          |
+  |                         |    (user opens message)  |
+  |                         |<-- send_read_receipt ----|  read receipt
+  |<-- on_msg_read ---------|                          |
+```
+
+**Server side**: The library automatically relays receipt markers (0xFC = delivered, 0xFD = read) between clients. The `on_message` callback sees all messages including receipts, so the application can log or persist them.
+
+**Client side**: The application calls `poc_send_read_receipt(ctx, sender_id)` when the user views a message. The sender's `on_msg_read` callback fires.
+
+```c
+/* Client: user opens a message from user 1000 */
+poc_send_read_receipt(ctx, 1000);
+
+/* Client: sender receives receipt */
+void on_msg_read(poc_ctx_t *ctx, uint32_t user_id, void *ud) {
+    printf("User %u read your message\n", user_id);
+    ui_mark_message_read(user_id);
+}
+```
+
+### Typing Indicators
+
+Typing state is sent per-user, not per-group:
+
+```c
+/* Client: user starts typing to user 2000 */
+poc_send_typing(ctx, 2000, true);
+
+/* Client: user stops typing (or after a timeout) */
+poc_send_typing(ctx, 2000, false);
+
+/* Other client receives typing indicator */
+void on_typing(poc_ctx_t *ctx, uint32_t user_id, bool typing, void *ud) {
+    if (typing)
+        ui_show_typing_indicator(user_id);
+    else
+        ui_hide_typing_indicator(user_id);
+}
+```
+
+The application should implement a typing timeout (e.g., 5 seconds) and send `false` if the user stops typing without sending a message.
+
+### Audio Bridging (Gateway / Repeater)
+
+A common use case is bridging PoC audio to/from another system (analog radio, SIP, WebRTC). The server API provides `inject_audio` and the `on_audio` callback for this:
+
+```c
+/* Bridge incoming PoC audio to an external system */
+void on_srv_audio(poc_server_t *srv, uint32_t speaker_id,
+                  uint32_t group_id, const int16_t *pcm,
+                  int n_samples, void *ud)
+{
+    bridge_t *bridge = (bridge_t *)ud;
+    /* Forward decoded PCM to external audio system */
+    external_send_audio(bridge->ext, pcm, n_samples, 8000);
+}
+
+/* Bridge incoming external audio into a PoC group */
+void bridge_rx_callback(const int16_t *pcm, int n_samples, void *ud)
+{
+    bridge_t *bridge = (bridge_t *)ud;
+
+    /* Start virtual PTT if not already talking */
+    if (!bridge->ptt_active) {
+        poc_server_start_ptt_for(bridge->srv, bridge->group_id,
+                                 bridge->virtual_uid, "RF Bridge");
+        bridge->ptt_active = true;
+    }
+
+    /* Inject audio frame-by-frame (160 samples = 20ms at 8kHz) */
+    poc_server_inject_audio(bridge->srv, bridge->group_id,
+                            bridge->virtual_uid, pcm, n_samples);
+}
+
+/* End virtual PTT when external source stops */
+void bridge_rx_end(void *ud)
+{
+    bridge_t *bridge = (bridge_t *)ud;
+    poc_server_end_ptt_for(bridge->srv, bridge->group_id,
+                           bridge->virtual_uid);
+    bridge->ptt_active = false;
+}
+```
+
+### Dispatch Console
+
+A dispatch console typically needs to:
+1. Monitor all groups simultaneously
+2. Override any speaker (high priority)
+3. Send announcements to all users
+4. Track who is online and where
+
+```c
+/* Create dispatcher with highest priority */
+poc_server_add_user(srv, &(poc_server_user_t){
+    .account  = "dispatch",
+    .password = "secret",
+    .user_id  = 1,
+    .priority = 100,  /* can pre-empt everyone */
+});
+
+/* Server callbacks for dispatch logging */
+bool on_ptt_request(poc_server_t *srv, uint32_t user_id,
+                    uint32_t group_id, void *ud) {
+    log_ptt_event(user_id, group_id, "request");
+    return true;  /* allow -- priority handles pre-emption */
+}
+
+void on_ptt_preempted(poc_server_t *srv, uint32_t old_uid,
+                      uint32_t new_uid, uint32_t gid, void *ud) {
+    log_ptt_event(old_uid, gid, "pre-empted by %u", new_uid);
+}
+
+/* Broadcast emergency alert */
+poc_server_broadcast(srv, "EMERGENCY: all units respond");
+
+/* Force a specific user into a group */
+poc_server_pull_to_group(srv, trouble_user_id, emergency_group_id);
+
+/* Kick a misbehaving user */
+poc_server_kick(srv, bad_user_id);
+```
+
+### SOS / Emergency Handling
+
+```c
+/* Client: trigger SOS */
+poc_send_sos(ctx, POC_ALERT_SOS);
+
+/* Server: handle SOS */
+void on_sos(poc_server_t *srv, uint32_t user_id, int alert_type, void *ud) {
+    const char *types[] = { "SOS", "Man-Down", "Fall", "Call Alarm" };
+    log_emergency(user_id, types[alert_type]);
+
+    /* Notify all users */
+    char msg[128];
+    snprintf(msg, sizeof(msg), "EMERGENCY: %s alert from user %u",
+             types[alert_type], user_id);
+    poc_server_broadcast(srv, msg);
+
+    /* Pull user into emergency group */
+    poc_server_pull_to_group(srv, user_id, EMERGENCY_GROUP_ID);
+}
+
+/* Client: cancel SOS */
+poc_cancel_sos(ctx);
+```
+
+### Presence and Status
+
+Users can set their presence status, and other clients receive updates:
+
+```c
+/* Client: set status to busy */
+poc_set_status(ctx, POC_STATUS_BUSY);
+
+/* Client: receive status changes */
+void on_user_status(poc_ctx_t *ctx, uint32_t user_id, int status, void *ud) {
+    const char *labels[] = { "offline", "online", "away", "busy", "lunch", "dnd" };
+    printf("User %u is now %s\n", user_id, labels[status]);
+    ui_update_roster(user_id, status);
+}
+```
+
+Available status values: `POC_STATUS_OFFLINE` (0), `POC_STATUS_ONLINE` (1), `POC_STATUS_AWAY` (2), `POC_STATUS_BUSY` (3), `POC_STATUS_LUNCH` (4), `POC_STATUS_DND` (5).
 
 ## Protocol Overview
 
