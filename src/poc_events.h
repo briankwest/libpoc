@@ -31,6 +31,10 @@ typedef enum {
     /* Phase 3: voice messages + emergency */
     POC_EVT_VOICE_MESSAGE,
     POC_EVT_SOS,
+    /* Messaging: receipts + typing */
+    POC_EVT_MSG_DELIVERED,
+    POC_EVT_MSG_READ,
+    POC_EVT_TYPING,
     /* Server-side: decoded audio from PoC client */
     POC_EVT_AUDIO,
 } poc_evt_type_t;
@@ -50,6 +54,9 @@ typedef struct {
         struct { uint32_t group_id; } pull_to_group;
         struct { uint32_t from_id; uint64_t note_id; char desc[128]; } voice_message;
         struct { uint32_t user_id; int alert_type; } sos;
+        struct { uint32_t user_id; } msg_delivered;
+        struct { uint32_t user_id; } msg_read;
+        struct { uint32_t user_id; bool typing; } typing;
         struct { uint32_t speaker_id; uint32_t group_id;
                  int16_t pcm[160]; } audio;
     };

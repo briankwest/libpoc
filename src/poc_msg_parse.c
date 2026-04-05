@@ -150,6 +150,12 @@ int poc_parse_message(poc_ctx_t *ctx, const uint8_t *data, int len)
 
     case CMD_NOTIFY_PKG_ACK:
         poc_log_at(POC_LOG_DEBUG, "message: delivered");
+        {
+            poc_event_t devt = { .type = POC_EVT_MESSAGE };
+            devt.message.from_id = 0;
+            snprintf(devt.message.text, sizeof(devt.message.text), "[delivered]");
+            poc_evt_push(&ctx->evt_queue, &devt);
+        }
         break;
 
     /* ── Phase 2: temp groups + dispatch ── */
@@ -285,8 +291,9 @@ static void handle_challenge(poc_ctx_t *ctx, const uint8_t *data, int len)
  */
 static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len)
 {
-    /* Login/validate error: server rejected our HMAC or account */
-    if (atomic_load(&ctx->login_state) == LOGIN_SENT_VALIDATE) {
+    /* Login/validate error: server rejected our account or HMAC */
+    login_state_t ls = atomic_load(&ctx->login_state);
+    if (ls == LOGIN_SENT_LOGIN || ls == LOGIN_SENT_VALIDATE) {
         int code = (len >= 1) ? data[0] : -1;
         if (code != 0) {
             /* Non-zero = auth failed */
@@ -332,17 +339,22 @@ static void handle_response(poc_ctx_t *ctx, const uint8_t *data, int len)
         return;
     }
 
-    /* Message delivery failure (0x25 = target unavailable) */
-    if (len >= 1 && data[0] != 0) {
+    /* Generic server response — could be ack to enter_group, leave_group, etc.
+     * Only treat as delivery failure if it's a known error code. */
+    if (len >= 1) {
         int code = data[0];
-        const char *reason = "unknown";
-        if (code == 0x25) reason = "user offline";
-        poc_log_at(POC_LOG_WARNING, "message: delivery failed — %s", reason);
-        poc_event_t evt = { .type = POC_EVT_MESSAGE };
-        evt.message.from_id = 0; /* from server */
-        snprintf(evt.message.text, sizeof(evt.message.text),
-                 "[delivery failed: %s]", reason);
-        poc_evt_push(&ctx->evt_queue, &evt);
+        if (code == 0) {
+            poc_log_at(POC_LOG_DEBUG, "response: command acknowledged (ok)");
+        } else if (code == 0x25) {
+            poc_log_at(POC_LOG_WARNING, "message: delivery failed — user offline");
+            poc_event_t evt = { .type = POC_EVT_MESSAGE };
+            evt.message.from_id = 0;
+            snprintf(evt.message.text, sizeof(evt.message.text),
+                     "[delivery failed: user offline]");
+            poc_evt_push(&ctx->evt_queue, &evt);
+        } else {
+            poc_log_at(POC_LOG_DEBUG, "response: code 0x%02x (ignored)", code);
+        }
     }
 }
 
@@ -360,9 +372,10 @@ static void handle_user_data(poc_ctx_t *ctx, const uint8_t *data, int len)
 
     /* Parse group list: [0-1] count (big-endian), then per group:
      * [4 bytes] group_id, [1 byte] name_len, [N bytes] name */
+    int off = 0;
     if (len >= 2) {
         int group_count = poc_read16(data);
-        int off = 2;
+        off = 2;
         ctx->group_count = 0;
 
         for (int i = 0; i < group_count && i < MAX_GROUPS && off < len; i++) {
@@ -387,13 +400,38 @@ static void handle_user_data(poc_ctx_t *ctx, const uint8_t *data, int len)
         poc_log("login: %d groups available", ctx->group_count);
     }
 
+    /* Parse user directory (appended after groups by updated servers).
+     * Format: [user_count(2)] + per user: [uid(4)][nlen(1)][name(N)][status(1)] */
+    if (off + 2 <= len) {
+        int ucount = poc_read16(data + off); off += 2;
+        ctx->user_count = 0;
+
+        for (int i = 0; i < ucount && i < MAX_USERS && off + 5 <= len; i++) {
+            uint32_t uid = poc_read32(data + off); off += 4;
+            int nlen = data[off]; off++;
+            if (off + nlen + 1 > len) break;
+
+            poc_user_t *u = &ctx->users[ctx->user_count];
+            u->id = uid;
+            int copy = nlen < 31 ? nlen : 31;
+            memcpy(u->account, data + off, copy);
+            u->account[copy] = '\0';
+            snprintf(u->name, sizeof(u->name), "%s", u->account);
+            off += nlen;
+            u->status = data[off]; off++;
+            u->privilege = 0;
+            ctx->user_count++;
+        }
+        poc_log("login: %d users in directory", ctx->user_count);
+    }
+
     /* Fire state change */
     poc_event_t evt = { .type = POC_EVT_STATE_CHANGE,
                         .state_change = { .state = POC_STATE_ONLINE }};
     poc_evt_push(&ctx->evt_queue, &evt);
 
-    /* Fire groups updated */
-    if (ctx->group_count > 0) {
+    /* Fire groups updated (also signals user roster is ready) */
+    if (ctx->group_count > 0 || ctx->user_count > 0) {
         poc_event_t gevt = { .type = POC_EVT_GROUPS_UPDATED };
         poc_evt_push(&ctx->evt_queue, &gevt);
     }
@@ -410,20 +448,30 @@ static void handle_start_ptt(poc_ctx_t *ctx, const uint8_t *data, int len)
     if (len < 4) return;
 
     uint32_t speaker_id = poc_read32(data);
-    bool anonymous = false;
 
-    if (len > 6) {
-        uint16_t ext_flags = poc_read16(data + 5);
-        anonymous = ext_flags & 1;
-    }
+    /* Server sends: [speaker_id(4)][flags(1)][name(null-terminated)]
+     * Parse the speaker name from offset 5 if present */
+    const char *speaker_name = NULL;
+    if (len > 5)
+        speaker_name = (const char *)(data + 5);
 
     atomic_store(&ctx->ptt_rx_active, true);
     ctx->ptt_speaker_id = speaker_id;
-    snprintf(ctx->ptt_speaker_name, sizeof(ctx->ptt_speaker_name),
-             anonymous ? "Anonymous" : "User %u", speaker_id);
 
-    poc_log("ptt: user %u started talking%s on group %u", speaker_id,
-            anonymous ? " (anonymous)" : "", ctx->active_group_id);
+    if (speaker_name && speaker_name[0]) {
+        snprintf(ctx->ptt_speaker_name, sizeof(ctx->ptt_speaker_name), "%s", speaker_name);
+    } else {
+        /* Look up from cached user directory */
+        const char *found = NULL;
+        for (int i = 0; i < ctx->user_count; i++) {
+            if (ctx->users[i].id == speaker_id) { found = ctx->users[i].name; break; }
+        }
+        snprintf(ctx->ptt_speaker_name, sizeof(ctx->ptt_speaker_name),
+                 "%s", found ? found : "Unknown");
+    }
+
+    poc_log("ptt: %s (user %u) started talking on group %u",
+            ctx->ptt_speaker_name, speaker_id, ctx->active_group_id);
 
     poc_event_t evt = { .type = POC_EVT_PTT_START,
                         .ptt_start = { .speaker_id = speaker_id,
@@ -569,8 +617,38 @@ static void handle_ext_data(poc_ctx_t *ctx, const uint8_t *data, int len)
             poc_evt_push(&ctx->evt_queue, &evt);
         } else {
             poc_log("SOS cancelled by user %u", from_id);
+            poc_event_t evt = { .type = POC_EVT_SOS,
+                                .sos = { .user_id = from_id, .alert_type = -1 }};
+            poc_evt_push(&ctx->evt_queue, &evt);
         }
         return;
+    }
+
+    /* Delivery receipt (0xFC), read receipt (0xFD), typing indicator (0xFB) */
+    if (len >= 5) {
+        uint8_t m = (uint8_t)data[4];
+        if (m == 0xFC) {
+            poc_log_at(POC_LOG_DEBUG, "message delivered to user %u", from_id);
+            poc_event_t evt = { .type = POC_EVT_MSG_DELIVERED,
+                                .msg_delivered = { .user_id = from_id }};
+            poc_evt_push(&ctx->evt_queue, &evt);
+            return;
+        }
+        if (m == 0xFD) {
+            poc_log_at(POC_LOG_DEBUG, "message read by user %u", from_id);
+            poc_event_t evt = { .type = POC_EVT_MSG_READ,
+                                .msg_read = { .user_id = from_id }};
+            poc_evt_push(&ctx->evt_queue, &evt);
+            return;
+        }
+        if (m == 0xFB) {
+            bool is_typing = (len >= 6 && data[5] != 0);
+            poc_log_at(POC_LOG_DEBUG, "user %u %s", from_id, is_typing ? "typing" : "stopped typing");
+            poc_event_t evt = { .type = POC_EVT_TYPING,
+                                .typing = { .user_id = from_id, .typing = is_typing }};
+            poc_evt_push(&ctx->evt_queue, &evt);
+            return;
+        }
     }
 
     /* Regular text message */

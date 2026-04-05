@@ -112,8 +112,20 @@ typedef struct {
     void (*on_voice_message)(poc_ctx_t *ctx, uint32_t from_id, uint64_t note_id,
                              const char *description, void *ud);
     void (*on_sos)(poc_ctx_t *ctx, uint32_t user_id, int alert_type, void *ud);
+    void (*on_msg_delivered)(poc_ctx_t *ctx, uint32_t user_id, void *ud);
+    void (*on_msg_read)(poc_ctx_t *ctx, uint32_t user_id, void *ud);
+    void (*on_typing)(poc_ctx_t *ctx, uint32_t user_id, bool typing, void *ud);
     void *userdata;
 } poc_callbacks_t;
+
+/* ── Presence status ────────────────────────────────────────────── */
+
+#define POC_STATUS_OFFLINE   0
+#define POC_STATUS_ONLINE    1
+#define POC_STATUS_AWAY      2
+#define POC_STATUS_BUSY      3
+#define POC_STATUS_LUNCH     4
+#define POC_STATUS_DND       5
 
 /* ── Logging ────────────────────────────────────────────────────── */
 
@@ -204,6 +216,11 @@ uint32_t     poc_get_user_id(const poc_ctx_t *ctx);
 const char  *poc_get_account(const poc_ctx_t *ctx);
 int          poc_get_group_count(const poc_ctx_t *ctx);
 int          poc_get_groups(const poc_ctx_t *ctx, poc_group_t *out, int max);
+int          poc_get_user_count(const poc_ctx_t *ctx);
+int          poc_get_users(const poc_ctx_t *ctx, poc_user_t *out, int max);
+int          poc_set_status(poc_ctx_t *ctx, int status);
+int          poc_send_read_receipt(poc_ctx_t *ctx, uint32_t to_user_id);
+int          poc_send_typing(poc_ctx_t *ctx, uint32_t to_user_id, bool typing);
 
 #ifdef __cplusplus
 }

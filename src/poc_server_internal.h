@@ -11,7 +11,7 @@
 #include <openssl/ssl.h>
 
 #define SRV_MAX_CLIENTS   64
-#define SRV_MAX_USERS     64
+#define SRV_MAX_USERS     256
 #define SRV_MAX_GROUPS    32
 #define SRV_MAX_GROUP_MEM 32
 #define SRV_RECV_BUF      (64 * 1024)
@@ -32,6 +32,7 @@ typedef struct {
     uint8_t             session_id;
     uint32_t            challenge_nonce;
     uint32_t            active_group;
+    uint32_t            private_call_target;  /* non-zero = in private call to this user */
     struct sockaddr_in  udp_addr;
     bool                has_udp_addr;
     uint64_t            last_heartbeat;
@@ -46,6 +47,7 @@ typedef struct {
 
 typedef struct {
     char     account[32];
+    char     name[64];
     char     password_sha1[41];
     uint32_t user_id;
 } srv_user_t;

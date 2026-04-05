@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <string.h>
+#include <arpa/inet.h>
 
 int poc_udp_open(poc_ctx_t *ctx)
 {
@@ -55,8 +56,13 @@ void poc_udp_close(poc_ctx_t *ctx)
 
 int poc_udp_send(poc_ctx_t *ctx, const uint8_t *data, int len)
 {
-    if (ctx->udp_fd < 0 || ctx->udp_server.sin_port == 0)
+    if (ctx->udp_fd < 0 || ctx->udp_server.sin_port == 0) {
+        static int udp_skip_count = 0;
+        if (++udp_skip_count <= 3)
+            poc_log_at(POC_LOG_ERROR, "udp: send skipped — fd=%d port=%d",
+                       ctx->udp_fd, ntohs(ctx->udp_server.sin_port));
         return POC_ERR_NETWORK;
+    }
 
     /* Build UDP packet: SeqNum + SenderID + pad + type + payload */
     uint8_t pkt[UDP_MAX_PKT];
@@ -77,6 +83,15 @@ int poc_udp_send(poc_ctx_t *ctx, const uint8_t *data, int len)
         poc_log_at(POC_LOG_ERROR, "udp: send error: %s", strerror(errno));
         return POC_ERR_NETWORK;
     }
+
+    static int udp_send_count = 0;
+    udp_send_count++;
+    if (udp_send_count <= 3 || (udp_send_count % 50) == 0)
+        poc_log("udp: sent pkt #%d (%d bytes) to %s:%d seq=%u uid=%u",
+                udp_send_count, total,
+                inet_ntoa(ctx->udp_server.sin_addr),
+                ntohs(ctx->udp_server.sin_port),
+                ctx->udp_seq - 1, ctx->user_id);
 
     return POC_OK;
 }

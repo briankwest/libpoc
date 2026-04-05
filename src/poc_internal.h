@@ -177,6 +177,7 @@ typedef struct {
 /* ── Group storage ──────────────────────────────────────────────── */
 
 #define MAX_GROUPS  64
+#define MAX_USERS   256
 
 /* ── Context ────────────────────────────────────────────────────── */
 
@@ -240,6 +241,9 @@ struct poc_ctx {
     poc_group_t     groups[MAX_GROUPS];
     int             group_count;
     uint32_t        active_group_id;
+
+    poc_user_t      users[MAX_USERS];
+    int             user_count;
 
     /* Audio codec (I/O thread only — NOT thread-safe) */
     poc_speex_t     speex;

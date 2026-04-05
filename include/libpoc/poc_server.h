@@ -38,6 +38,7 @@ typedef struct {
 /* User credentials — add before or after start */
 typedef struct {
     const char *account;
+    const char *name;            /* display name (NULL = use account) */
     const char *password;        /* raw — library SHA1-hashes internally */
     uint32_t    user_id;
 } poc_server_user_t;

@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <string.h>
 #include <netdb.h>
+#include <arpa/inet.h>
 #include <poll.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -39,6 +40,16 @@ int poc_tcp_connect(poc_ctx_t *ctx)
     /* Non-blocking connect */
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    /* Save resolved address for UDP (same host, same port) */
+    if (res->ai_family == AF_INET) {
+        memcpy(&ctx->udp_server, res->ai_addr, sizeof(ctx->udp_server));
+        poc_log("udp: target set to %s:%d",
+                inet_ntoa(ctx->udp_server.sin_addr),
+                ntohs(ctx->udp_server.sin_port));
+    } else {
+        poc_log_at(POC_LOG_ERROR, "udp: resolved address is not AF_INET (family=%d)", res->ai_family);
+    }
 
     rc = connect(fd, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);

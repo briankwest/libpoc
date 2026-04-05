@@ -217,16 +217,21 @@ static void srv_handle_validate(poc_server_t *srv, srv_client_t *cl, const uint8
     /* Broadcast online status */
     srv_status_broadcast(srv, cl->user_id, 1, cl->fd);
 
-    /* Build UserData: [session][cmd][count(2)][gid(4)][nlen(1)][name(N)]... */
-    uint8_t resp[512];
+    /* Build UserData: groups + user directory
+     * Format: [session][cmd][group_count(2)][groups...][user_count(2)][users...]
+     * Group: [gid(4)][nlen(1)][name(N)]
+     * User:  [uid(4)][nlen(1)][name(N)][status(1)]
+     */
+    uint8_t resp[4096];
     int off = 0;
     resp[off++] = session;
     resp[off++] = POC_NOTIFY_USER_DATA;
 
+    /* --- Groups --- */
     int gcount = 0;
     for (int i = 0; i < srv->group_count; i++) {
         srv_group_t *g = &srv->groups[i];
-        if (g->member_count == 0) { gcount++; continue; } /* open group */
+        if (g->member_count == 0) { gcount++; continue; }
         for (int j = 0; j < g->member_count; j++)
             if (g->members[j] == cl->user_id) { gcount++; break; }
     }
@@ -238,12 +243,30 @@ static void srv_handle_validate(poc_server_t *srv, srv_client_t *cl, const uint8
         for (int j = 0; !is_member && j < g->member_count; j++)
             if (g->members[j] == cl->user_id) is_member = true;
         if (!is_member) continue;
+        if (off + 5 + 64 > (int)sizeof(resp)) break;
         poc_write32(resp + off, g->id); off += 4;
         int nlen = strlen(g->name);
         resp[off++] = nlen;
         memcpy(resp + off, g->name, nlen); off += nlen;
     }
+
+    /* --- User directory --- */
+    poc_write16(resp + off, srv->user_count); off += 2;
+    for (int i = 0; i < srv->user_count; i++) {
+        srv_user_t *u = &srv->users[i];
+        if (off + 6 + 64 > (int)sizeof(resp)) break;
+        poc_write32(resp + off, u->user_id); off += 4;
+        /* Send display name (full name) */
+        const char *display = u->name[0] ? u->name : u->account;
+        int nlen = strlen(display);
+        resp[off++] = nlen;
+        memcpy(resp + off, display, nlen); off += nlen;
+        resp[off++] = poc_server_is_user_online(srv, u->user_id) ? 1 : 0;
+    }
+
     srv_send_frame(cl, resp, off);
+    poc_log("srv: sent user_data to %s: %d groups, %d users (%d bytes)",
+            cl->account, gcount, srv->user_count, off);
 
     /* Push connect event */
     poc_event_t evt = { .type = POC_EVT_USER_STATUS,
@@ -277,8 +300,55 @@ static void srv_handle_enter_group(poc_server_t *srv, srv_client_t *cl, const ui
     poc_evt_push(&srv->evt_queue, &evt);
 }
 
-static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx)
+static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx,
+                                 const uint8_t *data, int len)
 {
+    /* Check for private call: poc_call_user sends exactly 13 bytes with
+     * target user ID at bytes 9-12. Group PTT sends 9+name_len bytes
+     * with the account name at bytes 9+. Distinguish by length: private
+     * calls are exactly 13 bytes, group PTT is longer (has name). */
+    uint32_t target_uid = 0;
+    if (len == 13)
+        target_uid = poc_read32(data + 9);
+
+    if (target_uid != 0 && target_uid != cl->user_id) {
+        /* ── Private call ── */
+        srv_client_t *target = srv_find_client(srv, target_uid);
+        if (!target) {
+            poc_log_at(POC_LOG_WARNING, "srv: %s private call to %u — user not online",
+                       cl->account, target_uid);
+            uint8_t resp[4] = { cl->session_id, POC_NOTIFY_RESPONSE, 0x25 };
+            srv_send_frame(cl, resp, 3);
+            return;
+        }
+
+        /* Grant private call */
+        cl->private_call_target = target_uid;
+        uint8_t resp[4] = { cl->session_id, POC_NOTIFY_RESPONSE, 0 };
+        srv_send_frame(cl, resp, 3);
+
+        poc_log_at(POC_LOG_INFO, "srv: %s → private call to %s (uid %u)",
+                   cl->account, target->account, target_uid);
+
+        /* Look up display name */
+        srv_user_t *caller_user = NULL;
+        for (int i = 0; i < srv->user_count; i++)
+            if (srv->users[i].user_id == cl->user_id) { caller_user = &srv->users[i]; break; }
+        const char *display = (caller_user && caller_user->name[0]) ? caller_user->name : cl->account;
+
+        /* Notify target user only */
+        uint8_t notify[128];
+        int off = 0;
+        notify[off++] = 0; notify[off++] = POC_NOTIFY_START_PTT_PRI;
+        poc_write32(notify + off, cl->user_id); off += 4;
+        notify[off++] = 0;
+        int nlen = strlen(display) + 1;
+        memcpy(notify + off, display, nlen); off += nlen;
+        srv_send_frame(target, notify, off);
+        return;
+    }
+
+    /* ── Group PTT ── */
     if (cl->active_group == 0) return;
     int gidx = srv_find_group_idx(srv, cl->active_group);
     if (gidx < 0) return;
@@ -300,13 +370,19 @@ static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx
         srv->groups[gidx].floor_holder = cl_idx;
         poc_log_at(POC_LOG_INFO, "srv: %s granted PTT on group %u", cl->account, cl->active_group);
 
-        uint8_t notify[64];
+        /* Look up display name */
+        srv_user_t *caller_user = NULL;
+        for (int i = 0; i < srv->user_count; i++)
+            if (srv->users[i].user_id == cl->user_id) { caller_user = &srv->users[i]; break; }
+        const char *display = (caller_user && caller_user->name[0]) ? caller_user->name : cl->account;
+
+        uint8_t notify[128];
         int off = 0;
         notify[off++] = 0; notify[off++] = POC_NOTIFY_START_PTT_PRI;
         poc_write32(notify + off, cl->user_id); off += 4;
         notify[off++] = 0;
-        int nlen = strlen(cl->account) + 1;
-        memcpy(notify + off, cl->account, nlen); off += nlen;
+        int nlen = strlen(display) + 1;
+        memcpy(notify + off, display, nlen); off += nlen;
         srv_broadcast_group(srv, cl->active_group, notify, off, cl->fd);
     } else {
         poc_log_at(POC_LOG_DEBUG, "srv: %s PTT denied on group %u (floor busy)", cl->account, cl->active_group);
@@ -315,6 +391,26 @@ static void srv_handle_start_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx
 
 static void srv_handle_end_ptt(poc_server_t *srv, srv_client_t *cl, int cl_idx)
 {
+    /* Private call end */
+    if (cl->private_call_target != 0) {
+        uint32_t target_uid = cl->private_call_target;
+        cl->private_call_target = 0;
+        poc_log_at(POC_LOG_INFO, "srv: %s ended private call to %u", cl->account, target_uid);
+
+        srv_client_t *target = srv_find_client(srv, target_uid);
+        if (target) {
+            uint8_t notify[8];
+            int off = 0;
+            notify[off++] = 0; notify[off++] = POC_NOTIFY_END_PTT_PRI;
+            poc_write32(notify + off, cl->user_id); off += 4;
+            srv_send_frame(target, notify, off);
+        }
+        if (srv->cb.on_ptt_end)
+            srv->cb.on_ptt_end(srv, cl->user_id, 0, srv->cb.userdata);
+        return;
+    }
+
+    /* Group PTT end */
     if (cl->active_group == 0) return;
     int gidx = srv_find_group_idx(srv, cl->active_group);
     if (gidx >= 0 && srv->groups[gidx].floor_holder == cl_idx) {
@@ -340,24 +436,56 @@ static void srv_handle_ext_data(poc_server_t *srv, srv_client_t *cl, const uint8
     uint8_t marker = data[6];
     if (marker == POC_SOS_MARKER || marker == POC_SOS_CANCEL_MARKER) {
         int alert_type = (len > 7) ? data[7] : 0;
+        uint8_t relay[10];
+        int off = 0;
+        relay[off++] = 0; relay[off++] = POC_NOTIFY_EXT_DATA;
+        poc_write32(relay + off, cl->user_id); off += 4;
+        relay[off++] = marker;
+        relay[off++] = (uint8_t)alert_type;
+        srv_broadcast_all(srv, relay, off, cl->fd);
+
         if (marker == POC_SOS_MARKER) {
             poc_log_at(POC_LOG_WARNING, "srv: *** SOS ALERT from %s (user %u) ***", cl->account, cl->user_id);
-            uint8_t relay[10];
-            int off = 0;
-            relay[off++] = 0; relay[off++] = POC_NOTIFY_EXT_DATA;
-            poc_write32(relay + off, cl->user_id); off += 4;
-            relay[off++] = POC_SOS_MARKER;
-            relay[off++] = (uint8_t)alert_type;
-            srv_broadcast_all(srv, relay, off, cl->fd);
             if (srv->cb.on_sos)
                 srv->cb.on_sos(srv, cl->user_id, alert_type, srv->cb.userdata);
+        } else {
+            poc_log_at(POC_LOG_INFO, "srv: SOS CANCELLED by %s (user %u)", cl->account, cl->user_id);
+            if (srv->cb.on_sos)
+                srv->cb.on_sos(srv, cl->user_id, -1, srv->cb.userdata);
         }
         return;
     }
 
-    /* Regular message */
+    /* Regular message / receipts / typing — all have target_id at data[6..9] */
     if (len < 10) return;
     uint32_t target_id = poc_read32(data + 6);
+
+    /* Check for receipt/typing markers at data[10] */
+    if (len >= 11) {
+        uint8_t m = data[10];
+        if (m == 0xFD || m == 0xFC || m == 0xFB) {
+            const char *names[] = { [0xFB] = "typing", [0xFC] = "delivered", [0xFD] = "read" };
+            bool is_typing = (m == 0xFB && len >= 12) ? data[11] != 0 : false;
+            poc_log_at(POC_LOG_DEBUG, "srv: %s → %u: %s%s",
+                       cl->account, target_id,
+                       m == 0xFB ? "typing" : m == 0xFD ? "read receipt" : "delivery receipt",
+                       (m == 0xFB && !is_typing) ? " (stopped)" : "");
+
+            srv_client_t *target = srv_find_client(srv, target_id);
+            if (target) {
+                uint8_t relay[10];
+                int off = 0;
+                relay[off++] = 0; relay[off++] = POC_NOTIFY_EXT_DATA;
+                poc_write32(relay + off, cl->user_id); off += 4;
+                relay[off++] = m;
+                if (m == 0xFB) relay[off++] = is_typing ? 1 : 0;
+                srv_send_frame(target, relay, off);
+            }
+            return;
+        }
+    }
+
+    /* Regular text message */
     const char *text = (const char *)(data + 10);
     int text_len = len - 10;
 
@@ -380,6 +508,13 @@ static void srv_handle_ext_data(poc_server_t *srv, srv_client_t *cl, const uint8
             /* Send delivery ACK to sender */
             uint8_t ack[4] = { cl->session_id, POC_NOTIFY_PKG_ACK, 0x00 };
             srv_send_frame(cl, ack, 3);
+            /* Also send 0xFC delivery receipt with target user ID */
+            uint8_t drecp[8];
+            int doff = 0;
+            drecp[doff++] = 0; drecp[doff++] = POC_NOTIFY_EXT_DATA;
+            poc_write32(drecp + doff, target_id); doff += 4;
+            drecp[doff++] = 0xFC;
+            srv_send_frame(cl, drecp, doff);
         } else {
             /* Target not online — notify sender */
             poc_log_at(POC_LOG_INFO, "srv: user %u offline — notifying %s", target_id, cl->account);
@@ -453,7 +588,7 @@ static void srv_dispatch(poc_server_t *srv, int cl_idx, const uint8_t *data, int
         break;
     case POC_CMD_START_PTT:
     case POC_CMD_START_PTT_ALT:
-        srv_handle_start_ptt(srv, cl, cl_idx); break;
+        srv_handle_start_ptt(srv, cl, cl_idx, data, len); break;
     case POC_CMD_END_PTT:
     case POC_CMD_END_PTT_ALT:
         srv_handle_end_ptt(srv, cl, cl_idx); break;
@@ -564,7 +699,22 @@ static void srv_handle_udp(poc_server_t *srv)
             break;
         }
     }
-    if (!sender || !sender->active_group) return;
+    if (!sender) return;
+
+    /* Private call: route audio only to the target user */
+    if (sender->private_call_target != 0) {
+        for (int i = 0; i < srv->client_count; i++) {
+            srv_client_t *c = &srv->clients[i];
+            if (c->user_id == sender->private_call_target && c->has_udp_addr) {
+                sendto(srv->udp_fd, pkt, n, 0, (struct sockaddr *)&c->udp_addr, sizeof(c->udp_addr));
+                break;
+            }
+        }
+        /* No on_audio callback for private calls — don't bridge to RF */
+        return;
+    }
+
+    if (!sender->active_group) return;
 
     /* Relay raw packet to other clients in the group */
     for (int i = 0; i < srv->client_count; i++) {
@@ -738,6 +888,7 @@ int poc_server_add_user(poc_server_t *srv, const poc_server_user_t *user)
     if (!srv || !user || srv->user_count >= SRV_MAX_USERS) return POC_ERR;
     srv_user_t *u = &srv->users[srv->user_count++];
     snprintf(u->account, sizeof(u->account), "%s", user->account);
+    snprintf(u->name, sizeof(u->name), "%s", user->name ? user->name : user->account);
     srv_sha1_hex(user->password, u->password_sha1);
     u->user_id = user->user_id;
     return POC_OK;

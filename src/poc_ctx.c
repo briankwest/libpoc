@@ -20,15 +20,22 @@
 /* Forward declaration */
 static int locked_tcp_send(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len);
 
+static _Atomic int g_tx_drop_count = 0;
+
 /* ── I/O thread ─────────────────────────────────────────────────── */
 
 static void io_drain_tx(poc_ctx_t *ctx)
 {
     poc_ring_frame_t frame;
+    int drained = 0;
     while (poc_ring_pop(&ctx->tx_ring, &frame)) {
+        drained++;
         uint8_t encoded[SPEEX_FRAME_ENC];
         int enc_len = poc_speex_encode(&ctx->speex, frame.samples, encoded);
-        if (enc_len <= 0) continue;
+        if (enc_len <= 0) {
+            poc_log_at(POC_LOG_WARNING, "speex encode failed: %d", enc_len);
+            continue;
+        }
 
         uint8_t send_buf[128];
         int send_len = enc_len;
@@ -56,6 +63,8 @@ static void io_drain_tx(poc_ctx_t *ctx)
             poc_udp_send(ctx, send_data, send_len);
         }
     }
+    if (drained > 0)
+        poc_log_at(POC_LOG_WARNING, "tx: drained %d frames, sent via UDP", drained);
 }
 
 static void io_check_timers(poc_ctx_t *ctx)
@@ -182,13 +191,24 @@ static bool io_try_reconnect(poc_ctx_t *ctx)
 static void *io_thread_fn(void *arg)
 {
     poc_ctx_t *ctx = (poc_ctx_t *)arg;
-    poc_log_at(POC_LOG_DEBUG, "I/O thread started");
+    poc_log_at(POC_LOG_DEBUG, "I/O thread started (ctx=%p, tx_ring.cap=%d)",
+               (void *)ctx, ctx->tx_ring.capacity);
+    uint64_t loop_count = 0;
 
     while (atomic_load(&ctx->io_running)) {
+        loop_count++;
+
+        /* Log first 50 iterations in detail, then every 50 */
+        bool do_log = (loop_count <= 50) || ((loop_count % 50) == 0);
+        if (do_log)
+            poc_log_at(POC_LOG_WARNING, "I/O #%llu TOP reconnect=%d tcp=%d udp=%d",
+                       (unsigned long long)loop_count, ctx->reconnect_active,
+                       ctx->tcp_fd, ctx->udp_fd);
+
         /* If we're in reconnect backoff, check if it's time to retry */
         if (ctx->reconnect_active) {
+            if (do_log) poc_log_at(POC_LOG_WARNING, "I/O #%llu in RECONNECT", (unsigned long long)loop_count);
             io_try_reconnect(ctx);
-            /* Sleep on wakeup pipe only — no TCP/UDP fds yet */
             struct pollfd wfd = { .fd = ctx->io_wakeup[0], .events = POLLIN };
             poll(&wfd, 1, 100);
             if (wfd.revents & POLLIN) {
@@ -217,13 +237,20 @@ static void *io_thread_fn(void *arg)
             nfds++;
         }
 
+        if (do_log)
+            poc_log_at(POC_LOG_WARNING, "I/O #%llu POLL nfds=%d", (unsigned long long)loop_count, nfds);
+
         int rc = poll(fds, nfds, 20);
+
+        if (do_log)
+            poc_log_at(POC_LOG_WARNING, "I/O #%llu POLL returned rc=%d", (unsigned long long)loop_count, rc);
+
         if (rc < 0) {
             if (errno == EINTR) continue;
+            poc_log_at(POC_LOG_ERROR, "I/O: poll error: %s", strerror(errno));
             break;
         }
 
-        /* Check if we should stop (sockets may have been closed under us) */
         if (!atomic_load(&ctx->io_running)) break;
 
         /* Drain wakeup pipe */
@@ -237,7 +264,9 @@ static void *io_thread_fn(void *arg)
         for (int i = 1; i < nfds; i++) {
             if (fds[i].fd == ctx->tcp_fd) {
                 if (fds[i].revents & POLLIN) {
+                    if (do_log) poc_log_at(POC_LOG_WARNING, "I/O #%llu TCP recv...", (unsigned long long)loop_count);
                     rc = poc_tcp_recv(ctx);
+                    if (do_log) poc_log_at(POC_LOG_WARNING, "I/O #%llu TCP recv rc=%d", (unsigned long long)loop_count, rc);
                     if (rc == POC_ERR_NETWORK) tcp_dead = true;
                 }
                 if (fds[i].revents & (POLLERR | POLLHUP))
@@ -249,23 +278,34 @@ static void *io_thread_fn(void *arg)
         }
 
         if (tcp_dead) {
-            poc_log_at(POC_LOG_ERROR, "connection lost to server");
+            poc_log_at(POC_LOG_ERROR, "I/O: connection lost, reconnecting");
             io_start_reconnect(ctx);
             continue;
         }
 
-        /* Auth failure — no point retrying with the same credentials */
         if (atomic_load(&ctx->login_state) == LOGIN_FAILED) {
-            poc_log_at(POC_LOG_ERROR, "login failed — disconnecting");
+            poc_log_at(POC_LOG_ERROR, "I/O: login failed — exiting");
             break;
         }
 
-        io_drain_tx(ctx);
+        {
+            int tx_count = poc_ring_count(&ctx->tx_ring);
+            if (tx_count > 0 || (do_log && atomic_load(&ctx->ptt_active)))
+                poc_log_at(POC_LOG_WARNING, "I/O #%llu DRAIN tx=%d ptt=%d",
+                           (unsigned long long)loop_count, tx_count,
+                           (int)atomic_load(&ctx->ptt_active));
+            io_drain_tx(ctx);
+        }
         io_check_timers(ctx);
         poc_gps_tick(ctx);
+
+        if (do_log)
+            poc_log_at(POC_LOG_WARNING, "I/O #%llu BOTTOM", (unsigned long long)loop_count);
     }
 
-    poc_log_at(POC_LOG_DEBUG, "I/O thread exiting");
+    poc_log_at(POC_LOG_WARNING, "I/O thread EXITING (running=%d, login=%d, loop=%llu)",
+               atomic_load(&ctx->io_running), atomic_load(&ctx->login_state),
+               (unsigned long long)loop_count);
     return NULL;
 }
 
@@ -443,7 +483,7 @@ int poc_disconnect(poc_ctx_t *ctx)
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += 500000000;  /* 500ms max wait */
         if (ts.tv_nsec >= 1000000000) { ts.tv_nsec -= 1000000000; ts.tv_sec++; }
-#if defined(__linux__) || defined(__GLIBC__)
+#if (defined(__linux__) || defined(__GLIBC__)) && !defined(__ANDROID__)
         int jrc = pthread_timedjoin_np(ctx->io_thread, NULL, &ts);
         if (jrc != 0) {
             poc_log_at(POC_LOG_WARNING, "I/O thread join timed out, detaching");
@@ -524,6 +564,13 @@ int poc_poll(poc_ctx_t *ctx, int timeout_ms)
                 ctx->cb.on_state_change(ctx, POC_STATE_OFFLINE, ctx->cb.userdata);
             break;
         case POC_EVT_USER_STATUS:
+            /* Update cached user directory */
+            for (int i = 0; i < ctx->user_count; i++) {
+                if (ctx->users[i].id == evt.user_status.user_id) {
+                    ctx->users[i].status = evt.user_status.status;
+                    break;
+                }
+            }
             if (ctx->cb.on_user_status)
                 ctx->cb.on_user_status(ctx, evt.user_status.user_id,
                                        evt.user_status.status, ctx->cb.userdata);
@@ -555,7 +602,35 @@ int poc_poll(poc_ctx_t *ctx, int timeout_ms)
                 ctx->cb.on_sos(ctx, evt.sos.user_id, evt.sos.alert_type,
                                ctx->cb.userdata);
             break;
+        case POC_EVT_MSG_DELIVERED:
+            if (ctx->cb.on_msg_delivered)
+                ctx->cb.on_msg_delivered(ctx, evt.msg_delivered.user_id, ctx->cb.userdata);
+            break;
+        case POC_EVT_MSG_READ:
+            if (ctx->cb.on_msg_read)
+                ctx->cb.on_msg_read(ctx, evt.msg_read.user_id, ctx->cb.userdata);
+            break;
+        case POC_EVT_TYPING:
+            if (ctx->cb.on_typing)
+                ctx->cb.on_typing(ctx, evt.typing.user_id, evt.typing.typing, ctx->cb.userdata);
+            break;
         }
+    }
+
+    /* The I/O thread handles TCP/UDP recv and TX drain, but as a
+     * fallback we also do it here in case the I/O thread is stalled. */
+    io_drain_tx(ctx);
+    poc_udp_recv(ctx);
+    if (poc_tcp_recv(ctx) == POC_ERR_NETWORK) {
+        poc_log_at(POC_LOG_ERROR, "poll: connection lost — resetting to offline");
+        atomic_store(&ctx->state, POC_STATE_OFFLINE);
+        atomic_store(&ctx->ptt_active, false);
+        atomic_store(&ctx->ptt_rx_active, false);
+        poc_tcp_close(ctx);
+        poc_udp_close(ctx);
+        poc_event_t evt = { .type = POC_EVT_STATE_CHANGE,
+                            .state_change = { .state = POC_STATE_OFFLINE }};
+        poc_evt_push(&ctx->evt_queue, &evt);
     }
 
     /* Drain RX audio ring → fire audio callbacks */
@@ -634,8 +709,12 @@ int poc_ptt_start(poc_ctx_t *ctx)
     if (len < 0) return len;
 
     int rc = locked_tcp_send(ctx, buf, len);
-    if (rc == POC_OK)
+    if (rc == POC_OK) {
+        poc_ring_flush(&ctx->tx_ring);
+        atomic_store(&g_tx_drop_count, 0);
         atomic_store(&ctx->ptt_active, true);
+        poc_log("PTT start: tx_ring flushed, ring cap=%d", ctx->tx_ring.capacity);
+    }
     return rc;
 }
 
@@ -650,6 +729,8 @@ int poc_ptt_stop(poc_ctx_t *ctx)
 
     int rc = locked_tcp_send(ctx, buf, len);
     atomic_store(&ctx->ptt_active, false);
+    int drops = atomic_load(&g_tx_drop_count);
+    poc_log("PTT stop: %d frames dropped during session", drops);
     return rc;
 }
 
@@ -659,14 +740,26 @@ int poc_ptt_stop(poc_ctx_t *ctx)
  */
 int poc_ptt_send_audio(poc_ctx_t *ctx, const int16_t *pcm, int n_samples)
 {
-    if (!ctx || !atomic_load(&ctx->ptt_active))
+    if (!ctx || !atomic_load(&ctx->ptt_active)) {
+        static int skip_log = 0;
+        if (++skip_log <= 3)
+            poc_log_at(POC_LOG_WARNING, "send_audio: skipped — ctx=%p ptt_active=%d",
+                       (void *)ctx, ctx ? (int)atomic_load(&ctx->ptt_active) : -1);
         return POC_ERR_STATE;
+    }
 
     int offset = 0;
     while (offset + POC_AUDIO_FRAME_SAMPLES <= n_samples) {
         if (!poc_ring_push(&ctx->tx_ring, pcm + offset,
                            POC_AUDIO_FRAME_SAMPLES, 0, 0)) {
-            poc_log_at(POC_LOG_WARNING, "audio TX buffer full — dropping frame");
+            int drops = atomic_fetch_add(&g_tx_drop_count, 1);
+            if (drops == 0 || (drops % 50) == 0)
+                poc_log_at(POC_LOG_WARNING,
+                           "audio TX buffer full — dropped %d frames (ring: head=%u tail=%u cap=%d)",
+                           drops + 1,
+                           atomic_load(&ctx->tx_ring.head),
+                           atomic_load(&ctx->tx_ring.tail),
+                           ctx->tx_ring.capacity);
             break;
         }
         offset += POC_AUDIO_FRAME_SAMPLES;
@@ -750,6 +843,64 @@ int poc_get_groups(const poc_ctx_t *ctx, poc_group_t *out, int max)
     memcpy(out, ctx->groups, n * sizeof(poc_group_t));
     pthread_mutex_unlock(&((poc_ctx_t *)ctx)->sig_mutex);
     return n;
+}
+
+int poc_get_user_count(const poc_ctx_t *ctx)
+{
+    if (!ctx) return 0;
+    pthread_mutex_lock(&((poc_ctx_t *)ctx)->sig_mutex);
+    int n = ctx->user_count;
+    pthread_mutex_unlock(&((poc_ctx_t *)ctx)->sig_mutex);
+    return n;
+}
+
+int poc_get_users(const poc_ctx_t *ctx, poc_user_t *out, int max)
+{
+    if (!ctx || !out) return 0;
+    pthread_mutex_lock(&((poc_ctx_t *)ctx)->sig_mutex);
+    int n = ctx->user_count < max ? ctx->user_count : max;
+    memcpy(out, ctx->users, n * sizeof(poc_user_t));
+    pthread_mutex_unlock(&((poc_ctx_t *)ctx)->sig_mutex);
+    return n;
+}
+
+int poc_set_status(poc_ctx_t *ctx, int status)
+{
+    if (!ctx || atomic_load(&ctx->state) != POC_STATE_ONLINE)
+        return POC_ERR_STATE;
+    uint8_t buf[8];
+    buf[0] = ctx->session_id;
+    poc_write32(buf + 1, ctx->user_id);
+    buf[5] = CMD_NOTIFY_MOD_STATUS;
+    buf[6] = (uint8_t)status;
+    return locked_tcp_send(ctx, buf, 7);
+}
+
+int poc_send_read_receipt(poc_ctx_t *ctx, uint32_t to_user_id)
+{
+    if (!ctx || atomic_load(&ctx->state) != POC_STATE_ONLINE)
+        return POC_ERR_STATE;
+    uint8_t buf[16];
+    buf[0] = ctx->session_id;
+    poc_write32(buf + 1, ctx->user_id);
+    buf[5] = CMD_NOTIFY_EXT_DATA;
+    poc_write32(buf + 6, to_user_id);
+    buf[10] = 0xFD;  /* read receipt marker */
+    return locked_tcp_send(ctx, buf, 11);
+}
+
+int poc_send_typing(poc_ctx_t *ctx, uint32_t to_user_id, bool typing)
+{
+    if (!ctx || atomic_load(&ctx->state) != POC_STATE_ONLINE)
+        return POC_ERR_STATE;
+    uint8_t buf[16];
+    buf[0] = ctx->session_id;
+    poc_write32(buf + 1, ctx->user_id);
+    buf[5] = CMD_NOTIFY_EXT_DATA;
+    poc_write32(buf + 6, to_user_id);
+    buf[10] = 0xFB;  /* typing marker */
+    buf[11] = typing ? 1 : 0;
+    return locked_tcp_send(ctx, buf, 12);
 }
 
 poc_state_t poc_get_state(const poc_ctx_t *ctx)
