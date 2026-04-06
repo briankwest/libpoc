@@ -269,29 +269,27 @@ typedef struct {
     uint16_t         port;
 } test_server_t;
 
-static test_server_t create_test_server(void)
+static void create_test_server(test_server_t *t)
 {
-    test_server_t t;
-    memset(&t, 0, sizeof(t));
-    t.port = next_port();
+    memset(t, 0, sizeof(*t));
+    t->port = next_port();
 
-    poc_server_config_t cfg = { .bind_addr = "127.0.0.1", .port = t.port };
+    poc_server_config_t cfg = { .bind_addr = "127.0.0.1", .port = t->port };
     poc_server_callbacks_t cb = {
         .on_client_connect    = srv_cb_connect,
         .on_client_disconnect = srv_cb_disconnect,
         .on_message           = srv_cb_message,
         .on_audio             = srv_cb_audio,
-        .userdata             = &t.srv_state,
+        .userdata             = &t->srv_state,
     };
-    t.srv = poc_server_create(&cfg, &cb);
-    poc_server_add_user(t.srv, &(poc_server_user_t){
+    t->srv = poc_server_create(&cfg, &cb);
+    poc_server_add_user(t->srv, &(poc_server_user_t){
         .account = "alice", .password = "secret", .name = "Alice", .user_id = 1000 });
-    poc_server_add_user(t.srv, &(poc_server_user_t){
+    poc_server_add_user(t->srv, &(poc_server_user_t){
         .account = "bob", .password = "secret", .name = "Bob", .user_id = 2000 });
-    poc_server_add_group(t.srv, &(poc_server_group_t){
+    poc_server_add_group(t->srv, &(poc_server_group_t){
         .id = 100, .name = "Dispatch", .member_ids = NULL, .member_count = 0 });
-    poc_server_start(t.srv);
-    return t;
+    poc_server_start(t->srv);
 }
 
 static void destroy_test_server(test_server_t *t)
@@ -376,7 +374,7 @@ static int check_srv_group_leave(void *ud)
 static void test_login_success(void)
 {
     test_begin("login: successful handshake");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs; poc_callbacks_t cb;
     poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
 
@@ -391,7 +389,7 @@ static void test_login_success(void)
 static void test_server_sees_client(void)
 {
     test_begin("login: server sees connected client");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs; poc_callbacks_t cb;
     poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
 
@@ -407,7 +405,7 @@ static void test_server_sees_client(void)
 static void test_login_invalid_password(void)
 {
     test_begin("login: invalid password rejected");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs;
     poc_callbacks_t cb = make_callbacks(&cs);
     poc_config_t cfg = {
@@ -428,7 +426,7 @@ static void test_login_invalid_password(void)
 static void test_groups_received(void)
 {
     test_begin("login: groups received after login");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs; poc_callbacks_t cb;
     poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
 
@@ -443,7 +441,7 @@ static void test_groups_received(void)
 static void test_enter_group(void)
 {
     test_begin("group: enter group succeeds");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs; poc_callbacks_t cb;
     poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
 
@@ -460,7 +458,7 @@ static void test_enter_group(void)
 static void test_ptt_grant(void)
 {
     test_begin("ptt: floor granted when free");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs; poc_callbacks_t cb;
     poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
 
@@ -481,7 +479,7 @@ static void test_ptt_grant(void)
 static void test_ptt_denied_floor_busy(void)
 {
     test_begin("ptt: floor denied when busy");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
 
     client_state_t cs1, cs2;
     poc_callbacks_t cb1, cb2;
@@ -519,7 +517,7 @@ static void test_ptt_denied_floor_busy(void)
 static void test_audio_roundtrip(void)
 {
     test_begin("audio: frames reach listener");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
 
     client_state_t cs1, cs2;
     poc_callbacks_t cb1, cb2;
@@ -568,7 +566,7 @@ static void test_audio_roundtrip(void)
 static void test_group_message(void)
 {
     test_begin("messaging: group message delivered");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
 
     client_state_t cs1, cs2;
     poc_callbacks_t cb1, cb2;
@@ -600,7 +598,7 @@ static void test_group_message(void)
 static void test_disconnect(void)
 {
     test_begin("disconnect: clean disconnect");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs; poc_callbacks_t cb;
     poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
 
@@ -617,7 +615,7 @@ static void test_disconnect(void)
 static void test_server_client_count(void)
 {
     test_begin("server: client count tracks connections");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
 
     client_state_t cs1, cs2;
     poc_callbacks_t cb1, cb2;
@@ -644,7 +642,7 @@ static void test_server_client_count(void)
 static void test_user_id_assigned(void)
 {
     test_begin("login: user_id assigned after login");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs; poc_callbacks_t cb;
     poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
 
@@ -661,7 +659,7 @@ static void test_user_id_assigned(void)
 static void test_ptt_stop_releases_floor(void)
 {
     test_begin("ptt: stop releases floor for next user");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
 
     client_state_t cs1, cs2;
     poc_callbacks_t cb1, cb2;
@@ -704,38 +702,36 @@ static void test_ptt_stop_releases_floor(void)
 
 /* ── Priority pre-emption helper ───────────────────────────────── */
 
-static test_server_t create_priority_server(void)
+static void create_priority_server(test_server_t *t)
 {
-    test_server_t t;
-    memset(&t, 0, sizeof(t));
-    t.port = next_port();
+    memset(t, 0, sizeof(*t));
+    t->port = next_port();
 
-    poc_server_config_t cfg = { .bind_addr = "127.0.0.1", .port = t.port };
+    poc_server_config_t cfg = { .bind_addr = "127.0.0.1", .port = t->port };
     poc_server_callbacks_t cb = {
         .on_client_connect    = srv_cb_connect,
         .on_client_disconnect = srv_cb_disconnect,
         .on_message           = srv_cb_message,
         .on_audio             = srv_cb_audio,
-        .userdata             = &t.srv_state,
+        .userdata             = &t->srv_state,
     };
-    t.srv = poc_server_create(&cfg, &cb);
+    t->srv = poc_server_create(&cfg, &cb);
     /* Alice: normal priority (0), Bob: high priority (10) */
-    poc_server_add_user(t.srv, &(poc_server_user_t){
+    poc_server_add_user(t->srv, &(poc_server_user_t){
         .account = "alice", .password = "secret", .name = "Alice",
         .user_id = 1000, .priority = 0 });
-    poc_server_add_user(t.srv, &(poc_server_user_t){
+    poc_server_add_user(t->srv, &(poc_server_user_t){
         .account = "bob", .password = "secret", .name = "Bob",
         .user_id = 2000, .priority = 10 });
-    poc_server_add_group(t.srv, &(poc_server_group_t){
+    poc_server_add_group(t->srv, &(poc_server_group_t){
         .id = 100, .name = "Dispatch", .member_ids = NULL, .member_count = 0 });
-    poc_server_start(t.srv);
-    return t;
+    poc_server_start(t->srv);
 }
 
 static void test_ptt_preemption(void)
 {
     test_begin("ptt: high-priority pre-empts low-priority");
-    test_server_t t = create_priority_server();
+    test_server_t t; create_priority_server(&t);
 
     client_state_t cs1, cs2;
     poc_callbacks_t cb1, cb2;
@@ -774,7 +770,7 @@ static void test_ptt_preemption(void)
 static void test_ptt_no_preempt_equal(void)
 {
     test_begin("ptt: equal priority cannot pre-empt");
-    test_server_t t = create_test_server();  /* both pri=0 */
+    test_server_t t; create_test_server(&t);  /* both pri=0 */
 
     client_state_t cs1, cs2;
     poc_callbacks_t cb1, cb2;
@@ -868,7 +864,7 @@ static void init_test_server_with_group_cbs(test_server_t *t)
 static void test_leave_group(void)
 {
     test_begin("group: leave group succeeds");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs; poc_callbacks_t cb;
     poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
 
@@ -888,7 +884,7 @@ static void test_leave_group(void)
 static void test_private_message(void)
 {
     test_begin("messaging: private message delivered");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
 
     client_state_t cs1, cs2;
     poc_callbacks_t cb1, cb2;
@@ -917,7 +913,7 @@ static void test_private_message(void)
 static void test_server_kick(void)
 {
     test_begin("server: kick disconnects client");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs; poc_callbacks_t cb;
     poc_ctx_t *cli = connect_client(&t, "alice", &cs, &cb);
 
@@ -935,7 +931,7 @@ static void test_server_kick(void)
 static void test_server_broadcast(void)
 {
     test_begin("server: broadcast reaches all clients");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
 
     client_state_t cs1, cs2;
     poc_callbacks_t cb1, cb2;
@@ -964,7 +960,7 @@ static void test_server_broadcast(void)
 static void test_disconnect_during_ptt(void)
 {
     test_begin("ptt: disconnect during PTT frees floor");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
 
     client_state_t cs1, cs2;
     poc_callbacks_t cb1, cb2;
@@ -1030,7 +1026,7 @@ static void test_multiple_groups(void)
 static void test_server_inject_audio(void)
 {
     test_begin("server: inject audio reaches listener");
-    test_server_t t = create_test_server();
+    test_server_t t; create_test_server(&t);
     client_state_t cs; poc_callbacks_t cb;
     poc_ctx_t *bob = connect_client(&t, "bob", &cs, &cb);
 
