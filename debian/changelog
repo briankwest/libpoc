@@ -1,3 +1,9 @@
+libpoc (1.0.2-1) unstable; urgency=low
+
+  * Release 1.0.2
+
+ -- Brian West <brian@kerchunk.net>  Mon, 06 Apr 2026 14:44:17 +0000
+
 libpoc (1.0.1-1) stable; urgency=low
 
   * Initial stable release
