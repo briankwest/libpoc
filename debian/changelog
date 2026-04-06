@@ -11,4 +11,4 @@ libpoc (1.0.1-1) stable; urgency=low
   * AES encryption support
   * 104 tests
 
- -- Brian <brian@mcalester.net>  Wed, 02 Apr 2026 00:00:00 +0000
+ -- Brian <brian@kerchunk.net>  Wed, 02 Apr 2026 00:00:00 +0000
