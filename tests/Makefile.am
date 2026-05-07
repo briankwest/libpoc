@@ -10,7 +10,7 @@ test_libpoc_SOURCES = \
 	test_codec.c \
 	test_encrypt.c \
 	test_gps.c \
-	test_fec.c \
+	test_jitter.c \
 	test_ring.c
 
 test_libpoc_CFLAGS = \
@@ -18,13 +18,11 @@ test_libpoc_CFLAGS = \
 	-Wall -Wextra \
 	-I$(top_srcdir)/include/libpoc \
 	-I$(top_srcdir)/src \
-	$(SPEEX_CFLAGS) \
 	$(OPENSSL_CFLAGS) \
 	$(OPUS_CFLAGS)
 
 test_libpoc_LDADD = \
 	$(top_builddir)/src/libpoc.la \
-	$(SPEEX_LIBS) \
 	$(OPENSSL_LIBS) \
 	$(OPUS_LIBS) \
 	-lpthread \

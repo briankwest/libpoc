@@ -410,7 +410,6 @@ int main(int argc, char **argv)
     poc_config_t cfg = {
         .server_host = host, .server_port = port,
         .account = argv[optind + 1], .password = argv[optind + 2],
-        .codec = POC_CODEC_SPEEX,
     };
 
     poc_callbacks_t cb = {

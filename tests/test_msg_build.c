@@ -177,24 +177,12 @@ void test_msg_build(void)
     }
 
     {
-        test_begin("start_ptt: codec byte for speex is 0");
+        test_begin("start_ptt: codec byte is POC_CODEC_OPUS_SWB");
         poc_ctx_t *ctx = make_ctx();
         ctx->user_id = 42;
-        ctx->codec_type = POC_CODEC_SPEEX;
         uint8_t buf[64];
         poc_build_start_ptt(ctx, buf, sizeof(buf));
-        test_assert(buf[6] == 0, "speex = 0");
-        free(ctx);
-    }
-
-    {
-        test_begin("start_ptt: codec byte for speex is 0 (explicit)");
-        poc_ctx_t *ctx = make_ctx();
-        ctx->user_id = 42;
-        ctx->codec_type = POC_CODEC_SPEEX;
-        uint8_t buf[64];
-        poc_build_start_ptt(ctx, buf, sizeof(buf));
-        test_assert(buf[6] == 0, "speex = 0");
+        test_assert(buf[6] == POC_CODEC_OPUS_SWB, "codec byte = 7");
         free(ctx);
     }
 

@@ -1,16 +1,10 @@
 /*
  * poc_codec.h — Audio codec abstraction layer
  *
- * Vtable-style interface for pluggable audio codecs.
- * Each codec embeds poc_codec_t as its first member and
- * provides encode/decode/destroy via function pointers.
- *
- * Supported codecs:
- *   Speex NB   (8kHz, 160 samples/frame, ~20 bytes encoded)
- *   Speex WB   (16kHz, 320 samples/frame, ~46 bytes encoded)
- *   Speex UWB  (32kHz, 640 samples/frame, ~70 bytes encoded)
- *   G.711 PCMU (8kHz, 160 samples/frame, 160 bytes encoded)
- *   G.711 PCMA (8kHz, 160 samples/frame, 160 bytes encoded)
+ * Single codec: Opus super-wideband (24 kHz, 480 samples per 20 ms
+ * frame, 32 kbps, inband FEC). The vtable is retained so the encoder
+ * and decoder paths can be swapped under test, but production callers
+ * just use poc_codec_create() / poc_codec_encode() / poc_codec_decode().
  */
 
 #ifndef POC_CODEC_H
@@ -18,56 +12,47 @@
 
 #include <stdint.h>
 
-/* Maximum frame size across all supported codecs.
- * Sized for 48kHz at 20ms (future Opus support). */
-#define POC_CODEC_MAX_FRAME_SAMPLES  960
-#define POC_CODEC_MAX_ENCODED_SIZE   960   /* PCMU worst case = 1:1 */
+/* Worst-case encoded packet from the Opus encoder at 32 kbps VBR.
+ * Real packets run ~80 bytes; 256 leaves comfortable headroom. */
+#define POC_CODEC_MAX_FRAME_SAMPLES  480
+#define POC_CODEC_MAX_ENCODED_SIZE   256
 
 typedef struct poc_codec poc_codec_t;
 
 struct poc_codec {
-    /*
-     * Encode one frame of PCM → compressed bytes.
-     * Returns number of bytes written to `out`, or < 0 on error.
-     */
+    /* Encode one frame of PCM → compressed bytes.
+     * Returns number of bytes written, or < 0 on error. */
     int  (*encode)(poc_codec_t *c, const int16_t *pcm, int n_samples,
                    uint8_t *out, int out_max);
 
-    /*
-     * Decode compressed bytes → one frame of PCM.
-     * Returns number of samples written to `pcm`, or < 0 on error.
-     */
+    /* Decode compressed bytes → one frame of PCM.
+     * If `in` is NULL or in_len is 0, runs Opus PLC for a missing frame.
+     * Returns number of samples written, or < 0 on error. */
     int  (*decode)(poc_codec_t *c, const uint8_t *in, int in_len,
                    int16_t *pcm, int pcm_max);
 
-    /*
-     * Free codec resources. Called by poc_codec_destroy().
-     */
+    /* Decode the FEC redundancy embedded in the *next* packet to
+     * reconstruct the previously-lost frame. `in` MUST be the next
+     * received packet (sequence N+1) when frame N is missing. */
+    int  (*decode_fec)(poc_codec_t *c, const uint8_t *in, int in_len,
+                       int16_t *pcm, int pcm_max);
+
     void (*destroy)(poc_codec_t *c);
 
-    int  sample_rate;       /* Hz: 8000, 16000, 32000, 48000 */
-    int  frame_samples;     /* samples per frame */
-    int  frame_ms;          /* ms per frame (always 20) */
-    int  max_encoded_size;  /* worst-case encoded bytes per frame */
-    int  codec_type;        /* POC_CODEC_* enum value */
+    int  sample_rate;       /* always 24000 */
+    int  frame_samples;     /* always 480 */
+    int  frame_ms;          /* always 20 */
+    int  max_encoded_size;  /* always POC_CODEC_MAX_ENCODED_SIZE */
 };
 
-/*
- * Create a codec instance for the given type (POC_CODEC_* enum).
- * Returns NULL on invalid type or allocation failure.
- */
-poc_codec_t *poc_codec_create(int codec_type);
+/* Create the Opus SWB codec. Returns NULL on allocation failure. */
+poc_codec_t *poc_codec_create(void);
 
-/*
- * Destroy a codec instance. Safe to call with NULL.
- */
 static inline void poc_codec_destroy(poc_codec_t *c)
 {
     if (c && c->destroy)
         c->destroy(c);
 }
-
-/* Convenience wrappers */
 
 static inline int poc_codec_encode(poc_codec_t *c, const int16_t *pcm,
                                    int n_samples, uint8_t *out, int out_max)
@@ -79,6 +64,12 @@ static inline int poc_codec_decode(poc_codec_t *c, const uint8_t *in,
                                    int in_len, int16_t *pcm, int pcm_max)
 {
     return c->decode(c, in, in_len, pcm, pcm_max);
+}
+
+static inline int poc_codec_decode_fec(poc_codec_t *c, const uint8_t *in,
+                                       int in_len, int16_t *pcm, int pcm_max)
+{
+    return c->decode_fec(c, in, in_len, pcm, pcm_max);
 }
 
 #endif /* POC_CODEC_H */

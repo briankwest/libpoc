@@ -35,7 +35,7 @@ static void io_drain_tx(poc_ctx_t *ctx)
         int enc_len = poc_codec_encode(ctx->codec, frame.samples,
                                        frame.n_samples, encoded, sizeof(encoded));
         if (enc_len <= 0) {
-            poc_log_at(POC_LOG_WARNING, "speex encode failed: %d", enc_len);
+            poc_log_at(POC_LOG_WARNING, "opus encode failed: %d", enc_len);
             continue;
         }
 
@@ -56,17 +56,8 @@ static void io_drain_tx(poc_ctx_t *ctx)
             }
         }
 
-        /* FEC: may produce data + parity frame */
-        if (ctx->fec.enabled) {
-            uint8_t fec1[POC_FEC_MAX_FRAME], fec2[POC_FEC_MAX_FRAME];
-            int nframes = poc_fec_encode(&ctx->fec, send_data, send_len,
-                                          fec1, fec2, sizeof(fec1));
-            poc_udp_send(ctx, fec1, send_len);
-            if (nframes == 2)
-                poc_udp_send(ctx, fec2, send_len);
-        } else {
-            poc_udp_send(ctx, send_data, send_len);
-        }
+        /* Opus carries inband FEC inside each packet — no parity frames. */
+        poc_udp_send(ctx, send_data, send_len);
     }
     if (drained > 0)
         poc_log_at(POC_LOG_WARNING, "tx: drained %d frames, sent via UDP", drained);
@@ -341,7 +332,6 @@ poc_ctx_t *poc_create(const poc_config_t *cfg, const poc_callbacks_t *cb)
     if (cfg->iccid)
         snprintf(ctx->iccid, sizeof(ctx->iccid), "%s", cfg->iccid);
 
-    ctx->codec_type = cfg->codec;
     ctx->heartbeat_ms = cfg->heartbeat_ms > 0 ? cfg->heartbeat_ms : HEARTBEAT_DEFAULT_MS;
 
     /* TLS */
@@ -385,10 +375,10 @@ poc_ctx_t *poc_create(const poc_config_t *cfg, const poc_callbacks_t *cb)
     poc_ring_init(&ctx->tx_ring, tx_frames);
     poc_evt_init(&ctx->evt_queue);
 
-    /* Init codec */
-    ctx->codec = poc_codec_create(ctx->codec_type);
+    /* Init codec (Opus SWB, hardcoded) */
+    ctx->codec = poc_codec_create();
     if (!ctx->codec) {
-        poc_log_at(POC_LOG_ERROR, "unsupported codec type %d", ctx->codec_type);
+        poc_log_at(POC_LOG_ERROR, "failed to create Opus codec");
         poc_ring_destroy(&ctx->rx_ring);
         poc_ring_destroy(&ctx->tx_ring);
         pthread_mutex_destroy(&ctx->sig_mutex);
@@ -399,9 +389,20 @@ poc_ctx_t *poc_create(const poc_config_t *cfg, const poc_callbacks_t *cb)
     /* Init encryption */
     poc_encrypt_init(&ctx->encrypt);
 
-    /* Init FEC */
-    poc_fec_init(&ctx->fec, cfg->fec_group_size);
-    ctx->fec.enabled = cfg->enable_fec;
+    /* Init receive jitter buffer (default 120 ms = 6 frames at 20 ms). */
+    int jitter_ms = cfg->jitter_ms > 0 ? cfg->jitter_ms : 120;
+    int depth = jitter_ms / 20;
+    if (depth < 2) depth = 2;
+    if (poc_jb_init(&ctx->jb, depth) < 0) {
+        poc_log_at(POC_LOG_ERROR, "failed to allocate jitter buffer");
+        poc_codec_destroy(ctx->codec);
+        poc_encrypt_destroy(&ctx->encrypt);
+        poc_ring_destroy(&ctx->rx_ring);
+        poc_ring_destroy(&ctx->tx_ring);
+        pthread_mutex_destroy(&ctx->sig_mutex);
+        free(ctx);
+        return NULL;
+    }
 
     /* Init GPS */
     ctx->gps_interval_ms = cfg->gps_interval_ms > 0 ? cfg->gps_interval_ms
@@ -419,7 +420,7 @@ void poc_destroy(poc_ctx_t *ctx)
     poc_disconnect(ctx);
     poc_codec_destroy(ctx->codec);
     poc_encrypt_destroy(&ctx->encrypt);
-    poc_fec_destroy(&ctx->fec);
+    poc_jb_destroy(&ctx->jb);
     poc_ring_destroy(&ctx->rx_ring);
     poc_ring_destroy(&ctx->tx_ring);
     free(ctx->groups);
@@ -851,7 +852,7 @@ int poc_call_user(poc_ctx_t *ctx, uint32_t user_id)
     buf[0] = ctx->session_id;
     poc_write32(buf + 1, ctx->user_id);
     buf[5] = CMD_START_PTT;
-    buf[6] = (uint8_t)ctx->codec_type;
+    buf[6] = POC_CODEC_OPUS_SWB;
     poc_write16(buf + 7, 0x0000);
     poc_write32(buf + 9, user_id);
     int rc = poc_tcp_send_frame(ctx, buf, 13); pthread_mutex_unlock(&ctx->sig_mutex);

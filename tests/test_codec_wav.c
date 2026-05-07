@@ -1,8 +1,9 @@
 /*
- * test_codec_wav.c — Encode/decode WAV files through Speex codec
+ * test_codec_wav.c — Encode/decode WAV files through the Opus codec
  *
- * Reads 8kHz 16-bit mono WAV files from tests/wav/, roundtrips them
- * through Speex, writes output to tests/wav/speex/.
+ * Reads 16-bit mono WAV files from tests/wav/, roundtrips them through
+ * Opus SWB (24 kHz, 20 ms frames, 32 kbps, inband FEC), writes output
+ * to tests/wav/opus/.
  *
  * Usage: test_codec_wav [input_dir]
  */
@@ -70,9 +71,9 @@ static int resample(const int16_t *in, int in_len, int in_rate, int16_t **out, i
 int main(int argc, char **argv)
 {
     const char *input_dir = (argc > 1) ? argv[1] : "tests/wav";
-    char speex_dir[1024];
-    snprintf(speex_dir, sizeof(speex_dir), "%s/speex", input_dir);
-    mkdir(speex_dir, 0755);
+    char opus_dir[1024];
+    snprintf(opus_dir, sizeof(opus_dir), "%s/opus", input_dir);
+    mkdir(opus_dir, 0755);
 
     DIR *dir = opendir(input_dir);
     if (!dir) { fprintf(stderr, "Cannot open %s\n", input_dir); return 1; }
@@ -80,9 +81,9 @@ int main(int argc, char **argv)
     int total = 0, ok = 0;
     struct dirent *ent;
 
-    printf("Speex codec roundtrip test\n");
-    printf("==========================\n");
-    printf("Input:  %s\nOutput: %s\n\n", input_dir, speex_dir);
+    printf("Opus codec roundtrip test\n");
+    printf("=========================\n");
+    printf("Input:  %s\nOutput: %s\n\n", input_dir, opus_dir);
 
     while ((ent = readdir(dir)) != NULL) {
         int len = strlen(ent->d_name);
@@ -97,41 +98,41 @@ int main(int argc, char **argv)
         printf("%-40s  %5.1fs  %dHz", ent->d_name,
                (double)wav.n_samples / wav.sample_rate, wav.sample_rate);
 
-        int16_t *pcm8k = wav.samples;
-        int n8k = wav.n_samples;
+        int16_t *pcm = wav.samples;
+        int npcm = wav.n_samples;
         int need_free = 0;
-        if (wav.sample_rate != 8000) {
-            n8k = resample(wav.samples, wav.n_samples, wav.sample_rate, &pcm8k, 8000);
+        if (wav.sample_rate != POC_AUDIO_RATE) {
+            npcm = resample(wav.samples, wav.n_samples, wav.sample_rate, &pcm, POC_AUDIO_RATE);
             need_free = 1;
         }
 
-        int frames = (n8k / POC_AUDIO_FRAME_SAMPLES) * POC_AUDIO_FRAME_SAMPLES;
-        if (frames == 0) { printf("  (too short)\n"); free(wav.samples); if (need_free) free(pcm8k); continue; }
+        int frames = (npcm / POC_AUDIO_FRAME_SAMPLES) * POC_AUDIO_FRAME_SAMPLES;
+        if (frames == 0) { printf("  (too short)\n"); free(wav.samples); if (need_free) free(pcm); continue; }
 
-        poc_codec_t *spx = poc_codec_create(POC_CODEC_SPEEX_NB);
+        poc_codec_t *opus = poc_codec_create();
         int16_t *out = calloc(frames, sizeof(int16_t));
         int out_n = 0;
         for (int f = 0; f < frames / POC_AUDIO_FRAME_SAMPLES; f++) {
             uint8_t enc[POC_CODEC_MAX_ENCODED_SIZE];
-            int el = poc_codec_encode(spx, pcm8k + f * POC_AUDIO_FRAME_SAMPLES,
+            int el = poc_codec_encode(opus, pcm + f * POC_AUDIO_FRAME_SAMPLES,
                                       POC_AUDIO_FRAME_SAMPLES, enc, sizeof(enc));
             if (el > 0) {
-                int dl = poc_codec_decode(spx, enc, el,
+                int dl = poc_codec_decode(opus, enc, el,
                                           out + f * POC_AUDIO_FRAME_SAMPLES,
                                           POC_AUDIO_FRAME_SAMPLES);
                 if (dl > 0) out_n += dl;
             }
         }
-        poc_codec_destroy(spx);
+        poc_codec_destroy(opus);
 
         char outpath[1024];
-        snprintf(outpath, sizeof(outpath), "%s/%s", speex_dir, ent->d_name);
-        if (out_n > 0 && wav_write(outpath, out, out_n, 8000) == 0) {
+        snprintf(outpath, sizeof(outpath), "%s/%s", opus_dir, ent->d_name);
+        if (out_n > 0 && wav_write(outpath, out, out_n, POC_AUDIO_RATE) == 0) {
             printf("  OK\n"); ok++;
         } else {
             printf("  FAIL\n");
         }
-        free(out); free(wav.samples); if (need_free) free(pcm8k);
+        free(out); free(wav.samples); if (need_free) free(pcm);
     }
     closedir(dir);
 

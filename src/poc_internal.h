@@ -12,13 +12,13 @@
 
 #include "poc.h"
 #include "poc_codec.h"
+#include "poc_jitter.h"
 #include "poc_ring.h"
 #include "poc_events.h"
 #include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <speex/speex.h>
 #include <openssl/ssl.h>
 
 /* ── TCP Frame ("MS" framing) ───────────────────────────────────── */
@@ -100,12 +100,6 @@
 #define POC_ENCRYPT_KEY_LEN 32   /* max key length (AES-256) */
 #define POC_MAX_GROUP_KEYS  32   /* max per-group keys */
 
-/* ── FEC ────────────────────────────────────────────────────────── */
-
-#define POC_FEC_DEFAULT_GROUP 3  /* 3 data frames + 1 parity */
-#define POC_FEC_MAX_GROUP     8
-#define POC_FEC_MAX_FRAME    1024 /* max encoded frame size */
-
 /* ── GPS ────────────────────────────────────────────────────────── */
 
 #define GPS_DEFAULT_INTERVAL_MS  60000  /* 60 seconds */
@@ -143,26 +137,6 @@ typedef struct {
     poc_group_key_t  group_keys[POC_MAX_GROUP_KEYS];
 } poc_encrypt_t;
 
-/* ── FEC state ──────────────────────────────────────────────────── */
-
-typedef struct {
-    bool    enabled;
-    int     group_size;
-
-    /* Encoder */
-    int     enc_count;
-    uint8_t parity[POC_FEC_MAX_FRAME];
-    int     parity_len;
-
-    /* Decoder */
-    uint8_t dec_frames[POC_FEC_MAX_GROUP][POC_FEC_MAX_FRAME];
-    int     dec_frame_len[POC_FEC_MAX_GROUP];
-    uint8_t dec_parity[POC_FEC_MAX_FRAME];
-    int     dec_parity_len;
-    bool    dec_has_parity;
-    uint32_t dec_received;  /* bitmask */
-} poc_fec_t;
-
 /* ── Default initial capacities (grown dynamically) ────────────── */
 
 #define DEFAULT_GROUPS  64
@@ -178,7 +152,6 @@ struct poc_ctx {
     char        password_sha1[41]; /* hex SHA1 of password */
     char        imei[20];
     char        iccid[33];
-    int         codec_type;       /* POC_CODEC_* enum */
     int         heartbeat_ms;
 
     /* State (written by I/O thread, read by both) */
@@ -242,8 +215,8 @@ struct poc_ctx {
     /* Encryption (I/O thread only) */
     poc_encrypt_t   encrypt;
 
-    /* FEC (I/O thread only) */
-    poc_fec_t       fec;
+    /* Receive jitter buffer (I/O thread only) */
+    poc_jb_t        jb;
 
     /* GPS (written by caller, read by I/O thread) */
     float           gps_lat;
@@ -339,14 +312,6 @@ int         poc_build_gps_heartbeat(poc_ctx_t *ctx, uint8_t *buf, int buflen);
 int         poc_build_gps_aprs(poc_ctx_t *ctx, char *buf, int buflen);
 int         poc_gps_update(poc_ctx_t *ctx, float lat, float lng);
 void        poc_gps_tick(poc_ctx_t *ctx);
-
-/* poc_fec.c */
-void        poc_fec_init(poc_fec_t *fec, int group_size);
-void        poc_fec_destroy(poc_fec_t *fec);
-int         poc_fec_encode(poc_fec_t *fec, const uint8_t *in, int in_len,
-                           uint8_t *out1, uint8_t *out2, int out_max);
-int         poc_fec_decode(poc_fec_t *fec, const uint8_t *in, int in_len,
-                           int seq_in_group, uint8_t *out, int out_max);
 
 /* poc_msg_build.c — additional builders */
 int         poc_build_send_user_msg(poc_ctx_t *ctx, uint32_t user_id,

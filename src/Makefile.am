@@ -10,7 +10,7 @@ libpoc_la_SOURCES = \
 	poc_crypto.c \
 	poc_encrypt.c \
 	poc_gps.c \
-	poc_fec.c \
+	poc_jitter.c \
 	poc_server_ctx.c \
 	poc_util.c
 
@@ -20,14 +20,12 @@ libpoc_la_CFLAGS = \
 	-I$(top_srcdir)/include/libpoc \
 	-I$(top_srcdir)/src \
 	-DLIBPOC_GIT_HASH=\"$(GIT_HASH)\" \
-	$(SPEEX_CFLAGS) \
 	$(OPENSSL_CFLAGS) \
 	$(OPUS_CFLAGS)
 
 libpoc_la_LDFLAGS = -version-info 0:0:0
 
 libpoc_la_LIBADD = \
-	$(SPEEX_LIBS) \
 	$(OPENSSL_LIBS) \
 	$(OPUS_LIBS) \
 	-lpthread \

@@ -185,7 +185,7 @@ int poc_build_start_ptt(poc_ctx_t *ctx, uint8_t *buf, int buflen)
     buf[0] = ctx->session_id;
     poc_write32(buf + 1, ctx->user_id);
     buf[5] = CMD_START_PTT;
-    buf[6] = (uint8_t)ctx->codec_type;
+    buf[6] = POC_CODEC_OPUS_SWB;
     poc_write16(buf + 7, 0x0000);  /* flags */
     memcpy(buf + 9, name, name_len);
 

@@ -1,3 +1,16 @@
+libpoc (1.1.0-1) unstable; urgency=low
+
+  * Opus-only audio. Speex NB/WB/UWB, G.711 PCMU/PCMA removed.
+  * Codec is hardcoded Opus super-wideband: 24 kHz, 20 ms frames,
+    32 kbps VBR, inband FEC at 10 % loss target, complexity 10.
+  * Custom packet-level FEC (poc_fec.c) replaced by Opus inband FEC.
+  * poc_config_t loses `codec`, `enable_fec`, `fec_group_size`.
+  * poc_server_config_t loses any codec field (single codec).
+  * libspeex build dependency removed; libopus now required.
+  * ABI break — bump SONAME via -version-info on next release tag.
+
+ -- Brian West <brian@kerchunk.net>  Thu, 07 May 2026 16:00:00 +0000
+
 libpoc (1.0.2-1) unstable; urgency=low
 
   * Release 1.0.2

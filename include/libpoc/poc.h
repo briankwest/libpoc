@@ -1,8 +1,10 @@
 /*
  * poc.h — PoC (Push-to-Talk over Cellular) protocol library
  *
- * Implements the signaling and audio transport protocol used by
- * common PoC radios (Retevis, TYT, etc.) for group and private PTT.
+ * Implements the signaling and audio transport for PoC clients and
+ * servers. Audio is Opus super-wideband (24 kHz, 20 ms frames, 32 kbps,
+ * inband FEC). Signaling is the legacy "MS"-framed TCP protocol with
+ * optional TLS; voice is UDP.
  */
 
 #ifndef POC_H
@@ -39,25 +41,16 @@ typedef enum {
     POC_STATE_LOGOUT     = 3
 } poc_state_t;
 
-/* ── Audio codec ────────────────────────────────────────────────── */
+/* ── Audio codec ──────────────────────────────────────────────────
+ *
+ * One codec, hardcoded: Opus super-wideband, 24 kHz, 20 ms frames,
+ * 32 kbps, inband FEC at 10 % packet-loss target. The constant is
+ * sent as the codec byte in PTT_START frames for wire-format compat. */
+#define POC_CODEC_OPUS_SWB   7
 
-#define POC_CODEC_SPEEX_NB   0   /* Speex narrowband: 8kHz, 160 samples */
-#define POC_CODEC_SPEEX_WB   1   /* Speex wideband: 16kHz, 320 samples */
-#define POC_CODEC_SPEEX_UWB  2   /* Speex ultra-wideband: 32kHz, 640 samples */
-#define POC_CODEC_PCMU       3   /* G.711 μ-law: 8kHz, 160 samples */
-#define POC_CODEC_PCMA       4   /* G.711 A-law: 8kHz, 160 samples */
-#define POC_CODEC_OPUS_NB    5   /* Opus narrowband: 8kHz, 160 samples */
-#define POC_CODEC_OPUS_WB    6   /* Opus wideband: 16kHz, 320 samples */
-#define POC_CODEC_OPUS_SWB   7   /* Opus super-wideband: 24kHz, 480 samples */
-#define POC_CODEC_OPUS_FB    8   /* Opus fullband: 48kHz, 960 samples */
-#define POC_CODEC_OPUS_32K   9   /* Opus 32kHz: resamples to 48kHz internally */
-#define POC_CODEC_SPEEX      POC_CODEC_SPEEX_NB  /* backward compat */
-
-/* Default audio parameters (Speex narrowband). Actual values are
- * codec-dependent — use the poc_audio_frame_t fields at runtime. */
-#define POC_AUDIO_RATE       8000   /* Hz (default) */
-#define POC_AUDIO_FRAME_MS   20
-#define POC_AUDIO_FRAME_SAMPLES 160 /* 20ms @ 8kHz (default) */
+#define POC_AUDIO_RATE          24000
+#define POC_AUDIO_FRAME_MS      20
+#define POC_AUDIO_FRAME_SAMPLES 480   /* 20 ms @ 24 kHz */
 
 /* ── Configuration ──────────────────────────────────────────────── */
 
@@ -68,11 +61,10 @@ typedef struct {
     const char *password;        /* raw — library hashes with SHA1 */
     const char *imei;            /* may be NULL */
     const char *iccid;           /* may be NULL */
-    int         codec;           /* POC_CODEC_SPEEX */
     int         heartbeat_ms;    /* 0 = default (30000) */
-    bool        enable_fec;      /* audio forward error correction */
-    int         fec_group_size;  /* FEC group size (0 = default 3) */
     int         gps_interval_ms; /* GPS report interval (0 = default 60000) */
+    int         jitter_ms;       /* receive jitter buffer depth, ms.
+                                  * 0 = default (120 ms = 6 frames). */
     int         rx_ring_frames;  /* RX ring capacity (0 = default 64) */
     int         tx_ring_frames;  /* TX ring capacity (0 = default 64) */
 
@@ -102,8 +94,8 @@ typedef struct {
 
 typedef struct {
     const int16_t *samples;
-    int            n_samples;     /* codec-dependent (160, 320, 640, ...) */
-    int            sample_rate;   /* codec-dependent (8000, 16000, 32000) */
+    int            n_samples;     /* always 480 (20 ms @ 24 kHz) */
+    int            sample_rate;   /* always 24000 */
     uint32_t       speaker_id;
     uint32_t       group_id;
 } poc_audio_frame_t;
@@ -219,10 +211,6 @@ int  poc_cancel_sos(poc_ctx_t *ctx);
 /* ── Voice messages ────────────────────────────────────────────── */
 
 int  poc_request_voice_message(poc_ctx_t *ctx, uint64_t note_id);
-
-/* ── Codec availability ────────────────────────────────────────── */
-
-bool poc_codec_available(int codec_type);
 
 /* ── Encryption ─────────────────────────────────────────────────── */
 

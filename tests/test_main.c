@@ -59,7 +59,7 @@ extern void test_msg_parse(void);
 extern void test_codec(void);
 extern void test_encrypt(void);
 extern void test_gps(void);
-extern void test_fec(void);
+extern void test_jitter(void);
 extern void test_ring(void);
 
 int main(void)
@@ -82,7 +82,7 @@ int main(void)
     printf("\nMessage parser dispatch:\n");
     test_msg_parse();
 
-    printf("\nAudio codecs (Speex NB/WB/UWB, PCMU, PCMA):\n");
+    printf("\nAudio codec (Opus SWB):\n");
     test_codec();
 
     printf("\nEncryption (AES):\n");
@@ -91,8 +91,8 @@ int main(void)
     printf("\nGPS reporting:\n");
     test_gps();
 
-    printf("\nForward Error Correction:\n");
-    test_fec();
+    printf("\nJitter buffer (Opus FEC + reorder):\n");
+    test_jitter();
 
     printf("\nRing buffer & event queue:\n");
     test_ring();

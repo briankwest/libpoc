@@ -5,7 +5,6 @@ Maintainer: Brian <brian@kerchunk.net>
 Build-Depends:
  debhelper-compat (= 13),
  dh-autoreconf,
- libspeex-dev,
  libssl-dev,
  libopus-dev,
  pkg-config,
@@ -19,10 +18,10 @@ Multi-Arch: same
 Section: libs
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: PoC (Push-to-Talk over Cellular) protocol library
- A C library implementing the signaling and audio transport protocol
- used by PoC radios for group and private push-to-talk over cellular
- networks. Supports Speex, G.711, and Opus audio codecs, MS-framed TCP
- signaling, and UDP voice transport.
+ A C library implementing the signaling and audio transport for PoC
+ group and private push-to-talk. Audio is Opus super-wideband (24 kHz,
+ 32 kbps, inband FEC); signaling is MS-framed TCP with optional TLS;
+ voice transport is UDP.
 
 Package: libpoc-dev
 Architecture: any

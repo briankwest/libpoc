@@ -1022,8 +1022,8 @@ poc_server_t *poc_server_create(const poc_server_config_t *cfg,
     if (cfg && cfg->tls_key_path)
         snprintf(srv->tls_key_path, sizeof(srv->tls_key_path), "%s", cfg->tls_key_path);
 
-    /* Audio codec for decode/encode (default: Speex NB) */
-    srv->codec = poc_codec_create(POC_CODEC_SPEEX_NB);
+    /* Audio codec — Opus SWB, hardcoded (only supported codec) */
+    srv->codec = poc_codec_create();
     if (!srv->codec) { free(srv); return NULL; }
 
     if (cb) srv->cb = *cb;
