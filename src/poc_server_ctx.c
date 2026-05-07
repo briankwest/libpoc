@@ -871,20 +871,32 @@ static void *srv_io_thread(void *arg)
                     client_ssl = SSL_new(srv->ssl_ctx);
                     SSL_set_fd(client_ssl, cfd);
                     int tls_ok = 0;
-                    for (int att = 0; att < 8; att++) {
+                    int last_err = 0, last_ret = 0;
+                    /* ~5 s budget: 20 attempts × 250 ms poll */
+                    for (int att = 0; att < 20; att++) {
                         int ret = SSL_accept(client_ssl);
                         if (ret == 1) { tls_ok = 1; break; }
                         int err = SSL_get_error(client_ssl, ret);
+                        last_err = err; last_ret = ret;
                         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                            struct pollfd tp = { .fd = cfd, .events = POLLIN | POLLOUT };
+                            struct pollfd tp = { .fd = cfd,
+                                .events = (err == SSL_ERROR_WANT_WRITE) ? POLLOUT : POLLIN };
                             poll(&tp, 1, 250);
                             continue;
                         }
                         break;
                     }
                     if (!tls_ok) {
-                        poc_log_at(POC_LOG_WARNING, "srv: TLS handshake failed from %s",
-                                   inet_ntoa(ca.sin_addr));
+                        unsigned long e = ERR_peek_last_error();
+                        char ebuf[256] = "";
+                        if (e) ERR_error_string_n(e, ebuf, sizeof(ebuf));
+                        poc_log_at(POC_LOG_WARNING,
+                                   "srv: TLS handshake failed from %s "
+                                   "(SSL_accept ret=%d err=%d errno=%d: %s)",
+                                   inet_ntoa(ca.sin_addr),
+                                   last_ret, last_err, errno,
+                                   ebuf[0] ? ebuf : "no openssl error");
+                        ERR_clear_error();
                         SSL_free(client_ssl);
                         close(cfd);
                         continue;
@@ -1118,13 +1130,24 @@ int poc_server_start(poc_server_t *srv)
             return POC_ERR;
         }
         SSL_CTX_set_min_proto_version(srv->ssl_ctx, TLS1_2_VERSION);
-        if (SSL_CTX_use_certificate_file(srv->ssl_ctx, srv->tls_cert_path, SSL_FILETYPE_PEM) != 1) {
-            poc_log_at(POC_LOG_ERROR, "srv: failed to load TLS cert: %s", srv->tls_cert_path);
+        if (SSL_CTX_use_certificate_chain_file(srv->ssl_ctx, srv->tls_cert_path) != 1) {
+            unsigned long e = ERR_get_error();
+            poc_log_at(POC_LOG_ERROR, "srv: failed to load TLS cert chain: %s (%s)",
+                       srv->tls_cert_path, ERR_error_string(e, NULL));
             SSL_CTX_free(srv->ssl_ctx); srv->ssl_ctx = NULL;
             return POC_ERR;
         }
         if (SSL_CTX_use_PrivateKey_file(srv->ssl_ctx, srv->tls_key_path, SSL_FILETYPE_PEM) != 1) {
-            poc_log_at(POC_LOG_ERROR, "srv: failed to load TLS key: %s", srv->tls_key_path);
+            unsigned long e = ERR_get_error();
+            poc_log_at(POC_LOG_ERROR, "srv: failed to load TLS key: %s (%s)",
+                       srv->tls_key_path, ERR_error_string(e, NULL));
+            SSL_CTX_free(srv->ssl_ctx); srv->ssl_ctx = NULL;
+            return POC_ERR;
+        }
+        if (SSL_CTX_check_private_key(srv->ssl_ctx) != 1) {
+            unsigned long e = ERR_get_error();
+            poc_log_at(POC_LOG_ERROR, "srv: TLS cert/key mismatch (%s)",
+                       ERR_error_string(e, NULL));
             SSL_CTX_free(srv->ssl_ctx); srv->ssl_ctx = NULL;
             return POC_ERR;
         }
@@ -1270,13 +1293,25 @@ int poc_server_inject_audio(poc_server_t *srv, uint32_t group_id,
     int pkt_len = POC_UDP_HDR_LEN + enc_len;
 
     /* Send to all clients in the group */
+    int eligible = 0, sent = 0, no_udp = 0, wrong_group = 0, offline = 0;
     for (int i = 0; i < srv->client_count; i++) {
         srv_client_t *c = &srv->clients[i];
-        if (c->state != SRV_CLIENT_ONLINE) continue;
-        if (c->active_group != group_id) continue;
-        if (!c->has_udp_addr) continue;
+        if (c->state != SRV_CLIENT_ONLINE) { offline++; continue; }
+        if (c->active_group != group_id)   { wrong_group++; continue; }
+        eligible++;
+        if (!c->has_udp_addr)              { no_udp++; continue; }
         sendto(srv->udp_fd, pkt, pkt_len, 0,
                (struct sockaddr *)&c->udp_addr, sizeof(c->udp_addr));
+        sent++;
+    }
+    static int inject_count = 0;
+    inject_count++;
+    if (inject_count <= 3 || (inject_count % 50) == 0) {
+        poc_log_at(POC_LOG_INFO,
+                   "srv: inject_audio #%d gid=%u clients=%d eligible=%d sent=%d "
+                   "no_udp=%d wrong_group=%d offline=%d enc_len=%d",
+                   inject_count, group_id, srv->client_count,
+                   eligible, sent, no_udp, wrong_group, offline, enc_len);
     }
     return POC_OK;
 }
