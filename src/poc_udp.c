@@ -130,6 +130,17 @@ int poc_udp_recv(poc_ctx_t *ctx)
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(from);
 
+    /* Per-packet diagnostic counter — logged at first 3 packets and
+     * every 50th, regardless of the dedup/own-sender filters below.
+     * This is the "did anything reach the recvfrom() syscall" gate
+     * that lets the caller distinguish "server didn't send" from
+     * "client dropped silently". */
+    static uint32_t recv_count = 0;
+    static uint32_t self_drop = 0;
+    static uint32_t dup_drop = 0;
+    static uint32_t runt_drop = 0;
+    static uint32_t rx_inactive_drop = 0;
+
     for (;;) {
         int n = recvfrom(ctx->udp_fd, pkt, sizeof(pkt), 0,
                          (struct sockaddr *)&from, &fromlen);
@@ -139,7 +150,10 @@ int poc_udp_recv(poc_ctx_t *ctx)
             return POC_ERR_NETWORK;
         }
 
+        recv_count++;
+
         if (n < UDP_HDR_LEN) {
+            runt_drop++;
             poc_log_at(POC_LOG_WARNING, "udp: runt packet %d bytes", n);
             continue;
         }
@@ -149,12 +163,27 @@ int poc_udp_recv(poc_ctx_t *ctx)
         /* uint8_t content_type = pkt[7]; — for future use */
         (void)pkt[7];
 
-        if (udp_dedup_check(ctx, seq))
+        if (recv_count <= 3 || (recv_count % 50) == 0) {
+            char addr[64] = "";
+            inet_ntop(AF_INET, &from.sin_addr, addr, sizeof(addr));
+            poc_log_at(POC_LOG_INFO,
+                       "udp: recv pkt #%u from %s:%d sender_uid=%u seq=%u len=%d "
+                       "(drops: self=%u dup=%u runt=%u rx_inactive=%u)",
+                       recv_count, addr, ntohs(from.sin_port),
+                       sender_id, seq, n,
+                       self_drop, dup_drop, runt_drop, rx_inactive_drop);
+        }
+
+        if (udp_dedup_check(ctx, seq)) {
+            dup_drop++;
             continue;
+        }
 
         /* Skip our own packets */
-        if (sender_id == ctx->user_id)
+        if (sender_id == ctx->user_id) {
+            self_drop++;
             continue;
+        }
 
         int payload_len = n - UDP_HDR_LEN;
         const uint8_t *payload = pkt + UDP_HDR_LEN;

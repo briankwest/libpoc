@@ -1341,24 +1341,41 @@ int poc_server_inject_audio(poc_server_t *srv, uint32_t group_id,
 
     /* Send to all clients in the group */
     int eligible = 0, sent = 0, no_udp = 0, wrong_group = 0, offline = 0;
+    int send_errs = 0;
+    /* Capture the first eligible client's address for the periodic log. */
+    char first_dest[64] = "";
+    int  first_port = 0;
     for (int i = 0; i < srv->client_count; i++) {
         srv_client_t *c = &srv->clients[i];
         if (c->state != SRV_CLIENT_ONLINE) { offline++; continue; }
         if (c->active_group != group_id)   { wrong_group++; continue; }
         eligible++;
         if (!c->has_udp_addr)              { no_udp++; continue; }
-        sendto(srv->udp_fd, pkt, pkt_len, 0,
-               (struct sockaddr *)&c->udp_addr, sizeof(c->udp_addr));
-        sent++;
+        if (!first_dest[0]) {
+            inet_ntop(AF_INET, &c->udp_addr.sin_addr, first_dest, sizeof(first_dest));
+            first_port = ntohs(c->udp_addr.sin_port);
+        }
+        ssize_t rc = sendto(srv->udp_fd, pkt, pkt_len, 0,
+                            (struct sockaddr *)&c->udp_addr, sizeof(c->udp_addr));
+        if (rc < 0) send_errs++;
+        else sent++;
     }
     static int inject_count = 0;
     inject_count++;
     if (inject_count <= 3 || (inject_count % 50) == 0) {
         poc_log_at(POC_LOG_INFO,
                    "srv: inject_audio #%d gid=%u clients=%d eligible=%d sent=%d "
-                   "no_udp=%d wrong_group=%d offline=%d enc_len=%d",
+                   "no_udp=%d wrong_group=%d offline=%d send_errs=%d "
+                   "enc_len=%d first_dest=%s:%d",
                    inject_count, group_id, srv->client_count,
-                   eligible, sent, no_udp, wrong_group, offline, enc_len);
+                   eligible, sent, no_udp, wrong_group, offline, send_errs,
+                   enc_len,
+                   first_dest[0] ? first_dest : "-", first_port);
+    }
+    if (send_errs > 0) {
+        poc_log_at(POC_LOG_WARNING,
+                   "srv: inject_audio #%d sendto errors=%d errno=%d (%s)",
+                   inject_count, send_errs, errno, strerror(errno));
     }
     return POC_OK;
 }
@@ -1381,6 +1398,30 @@ int poc_server_start_ptt_for(poc_server_t *srv, uint32_t group_id,
         }
     }
     srv_broadcast_group(srv, group_id, notify, off, -1);
+
+    /* Snapshot each in-group client's cached UDP address — this is
+     * where audio will be sent to during the upcoming TX. If the
+     * cached address is stale or missing, RX silently goes nowhere. */
+    for (int i = 0; i < srv->client_count; i++) {
+        srv_client_t *c = &srv->clients[i];
+        if (c->state != SRV_CLIENT_ONLINE) continue;
+        if (c->active_group != group_id) continue;
+        if (c->has_udp_addr) {
+            char addr[64];
+            inet_ntop(AF_INET, &c->udp_addr.sin_addr, addr, sizeof(addr));
+            uint64_t age_ms = poc_mono_ms() - c->last_audio_time;
+            poc_log_at(POC_LOG_INFO,
+                       "srv: ptt_start_for(gid=%u): client uid=%u udp=%s:%d "
+                       "(last_inbound %llu ms ago)",
+                       group_id, c->user_id, addr, ntohs(c->udp_addr.sin_port),
+                       (unsigned long long)age_ms);
+        } else {
+            poc_log_at(POC_LOG_WARNING,
+                       "srv: ptt_start_for(gid=%u): client uid=%u has NO udp_addr "
+                       "— RX will not reach this client",
+                       group_id, c->user_id);
+        }
+    }
     return POC_OK;
 }
 
