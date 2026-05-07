@@ -649,8 +649,12 @@ int poc_poll(poc_ctx_t *ctx, int timeout_ms)
         }
     }
 
-    /* The I/O thread handles TCP/UDP recv and TX drain, but as a
-     * fallback we also do it here in case the I/O thread is stalled. */
+    /* The I/O thread is the canonical owner of socket I/O, but as a
+     * fallback we also drain TX and recv from the caller thread in
+     * case the I/O thread is stalled. The double-free that was
+     * possible here previously is gone: poc_tcp_close / poc_udp_close
+     * are now mutex-guarded and idempotent, so concurrent close from
+     * the I/O thread and the caller thread is safe. */
     io_drain_tx(ctx);
     poc_udp_recv(ctx);
     if (poc_tcp_recv(ctx) == POC_ERR_NETWORK) {

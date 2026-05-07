@@ -58,12 +58,14 @@ int poc_udp_open(poc_ctx_t *ctx)
     return POC_OK;
 }
 
+/* Idempotent under concurrent calls — see comment on poc_tcp_close. */
 void poc_udp_close(poc_ctx_t *ctx)
 {
-    if (ctx->udp_fd >= 0) {
-        close(ctx->udp_fd);
-        ctx->udp_fd = -1;
-    }
+    pthread_mutex_lock(&ctx->sig_mutex);
+    int fd = ctx->udp_fd;
+    ctx->udp_fd = -1;
+    pthread_mutex_unlock(&ctx->sig_mutex);
+    if (fd >= 0) close(fd);
 }
 
 int poc_udp_send(poc_ctx_t *ctx, const uint8_t *data, int len)

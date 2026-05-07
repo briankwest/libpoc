@@ -759,63 +759,110 @@ static int srv_tcp_recv(poc_server_t *srv, int cl_idx)
 
 static void srv_handle_udp(poc_server_t *srv)
 {
+    /* Drain every datagram available — a single epoll wakeup can have
+     * accumulated many UDP packets, and recvfrom only returns one at
+     * a time. Stopping after one packet (the previous behaviour) lost
+     * audio when bursts arrived faster than the I/O thread looped. */
     uint8_t pkt[1500];
     struct sockaddr_in from;
-    socklen_t flen = sizeof(from);
-    int n = recvfrom(srv->udp_fd, pkt, sizeof(pkt), 0, (struct sockaddr *)&from, &flen);
-    if (n < POC_UDP_HDR_LEN) return;
+    socklen_t flen;
 
-    uint32_t sender_id = poc_read32(pkt + 2);
-    srv_client_t *sender = NULL;
-    for (int i = 0; i < srv->client_count; i++) {
-        if (srv->clients[i].user_id == sender_id && srv->clients[i].state == SRV_CLIENT_ONLINE) {
-            sender = &srv->clients[i];
-            sender->udp_addr = from;
-            sender->has_udp_addr = true;
-            sender->last_audio_time = poc_mono_ms();
-            break;
+    /* Per-event diagnostic counters. Logged at first 3 packets and
+     * every 50th to confirm whether iOS is actually streaming and how
+     * many of its packets the Opus decoder accepts. */
+    static uint32_t recv_count = 0;
+    static uint32_t no_sender = 0;
+    static uint32_t no_group = 0;
+    static uint32_t decode_ok = 0;
+    static uint32_t decode_fail = 0;
+    static uint32_t evt_full = 0;
+
+    for (;;) {
+        flen = sizeof(from);
+        int n = recvfrom(srv->udp_fd, pkt, sizeof(pkt), 0,
+                         (struct sockaddr *)&from, &flen);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return;  /* fully drained */
+            poc_log_at(POC_LOG_WARNING, "srv: udp recv error: %s", strerror(errno));
+            return;
         }
-    }
-    if (!sender) return;
+        if (n < POC_UDP_HDR_LEN) continue;
 
-    /* Private call: route audio only to the target user */
-    if (sender->private_call_target != 0) {
+        recv_count++;
+        uint32_t sender_id = poc_read32(pkt + 2);
+        srv_client_t *sender = NULL;
         for (int i = 0; i < srv->client_count; i++) {
-            srv_client_t *c = &srv->clients[i];
-            if (c->user_id == sender->private_call_target && c->has_udp_addr) {
-                sendto(srv->udp_fd, pkt, n, 0, (struct sockaddr *)&c->udp_addr, sizeof(c->udp_addr));
+            if (srv->clients[i].user_id == sender_id &&
+                srv->clients[i].state == SRV_CLIENT_ONLINE) {
+                sender = &srv->clients[i];
+                sender->udp_addr = from;
+                sender->has_udp_addr = true;
+                sender->last_audio_time = poc_mono_ms();
                 break;
             }
         }
-        /* No on_audio callback for private calls — don't bridge to RF */
-        return;
-    }
+        if (!sender) {
+            no_sender++;
+            continue;
+        }
 
-    if (!sender->active_group) return;
+        /* Private call: route only to the target user. */
+        if (sender->private_call_target != 0) {
+            for (int i = 0; i < srv->client_count; i++) {
+                srv_client_t *c = &srv->clients[i];
+                if (c->user_id == sender->private_call_target && c->has_udp_addr) {
+                    sendto(srv->udp_fd, pkt, n, 0,
+                           (struct sockaddr *)&c->udp_addr, sizeof(c->udp_addr));
+                    break;
+                }
+            }
+            continue;  /* no on_audio for private calls */
+        }
 
-    /* Relay raw packet to other clients in the group */
-    for (int i = 0; i < srv->client_count; i++) {
-        srv_client_t *c = &srv->clients[i];
-        if (c == sender || c->state != SRV_CLIENT_ONLINE) continue;
-        if (c->active_group != sender->active_group) continue;
-        if (!c->has_udp_addr) continue;
-        sendto(srv->udp_fd, pkt, n, 0, (struct sockaddr *)&c->udp_addr, sizeof(c->udp_addr));
-    }
+        if (!sender->active_group) {
+            no_group++;
+            continue;
+        }
 
-    /* Decode audio and push event for on_audio callback */
-    if (srv->cb.on_audio && n > POC_UDP_HDR_LEN) {
-        const uint8_t *encoded = pkt + POC_UDP_HDR_LEN;
-        int enc_len = n - POC_UDP_HDR_LEN;
-        int16_t pcm[POC_CODEC_MAX_FRAME_SAMPLES];
-        int decoded = poc_codec_decode(srv->codec, encoded, enc_len,
-                                       pcm, POC_CODEC_MAX_FRAME_SAMPLES);
-        if (decoded > 0) {
-            poc_event_t evt = { .type = POC_EVT_AUDIO };
-            evt.audio.speaker_id = sender_id;
-            evt.audio.group_id = sender->active_group;
-            evt.audio.n_samples = decoded;
-            memcpy(evt.audio.pcm, pcm, decoded * sizeof(int16_t));
-            poc_evt_push(&srv->evt_queue, &evt);
+        /* Relay the raw packet to other clients in the group. */
+        for (int i = 0; i < srv->client_count; i++) {
+            srv_client_t *c = &srv->clients[i];
+            if (c == sender || c->state != SRV_CLIENT_ONLINE) continue;
+            if (c->active_group != sender->active_group) continue;
+            if (!c->has_udp_addr) continue;
+            sendto(srv->udp_fd, pkt, n, 0,
+                   (struct sockaddr *)&c->udp_addr, sizeof(c->udp_addr));
+        }
+
+        /* Decode for the on_audio callback (mod_poc bridges to RF). */
+        if (srv->cb.on_audio && n > POC_UDP_HDR_LEN) {
+            const uint8_t *encoded = pkt + POC_UDP_HDR_LEN;
+            int enc_len = n - POC_UDP_HDR_LEN;
+            int16_t pcm[POC_CODEC_MAX_FRAME_SAMPLES];
+            int decoded = poc_codec_decode(srv->codec, encoded, enc_len,
+                                           pcm, POC_CODEC_MAX_FRAME_SAMPLES);
+            if (decoded > 0) {
+                decode_ok++;
+                poc_event_t evt = { .type = POC_EVT_AUDIO };
+                evt.audio.speaker_id = sender_id;
+                evt.audio.group_id   = sender->active_group;
+                evt.audio.n_samples  = decoded;
+                memcpy(evt.audio.pcm, pcm, (size_t)decoded * sizeof(int16_t));
+                if (!poc_evt_push(&srv->evt_queue, &evt))
+                    evt_full++;
+            } else {
+                decode_fail++;
+            }
+        }
+
+        if (recv_count <= 3 || (recv_count % 50) == 0) {
+            poc_log_at(POC_LOG_INFO,
+                       "srv: udp pkt #%u from uid=%u len=%d "
+                       "(decode ok=%u fail=%u, drops: no_sender=%u no_group=%u evt_full=%u)",
+                       recv_count, sender_id, n,
+                       decode_ok, decode_fail,
+                       no_sender, no_group, evt_full);
         }
     }
 }

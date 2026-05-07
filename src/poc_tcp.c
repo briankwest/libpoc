@@ -126,7 +126,16 @@ int poc_tcp_connect(poc_ctx_t *ctx)
                 struct pollfd tp = { .fd = fd, .events = POLLOUT };
                 poll(&tp, 1, 250);
             } else {
-                poc_log_at(POC_LOG_ERROR, "TLS: handshake failed (SSL error %d)", err);
+                unsigned long e = ERR_peek_last_error();
+                char ebuf[256] = "";
+                if (e) ERR_error_string_n(e, ebuf, sizeof(ebuf));
+                poc_log_at(POC_LOG_ERROR,
+                           "TLS: handshake failed (ret=%d ssl_err=%d errno=%d: %s)",
+                           ret, err, errno,
+                           ebuf[0] ? ebuf
+                                   : (err == SSL_ERROR_SYSCALL
+                                          ? strerror(errno) : "no openssl error"));
+                ERR_clear_error();
                 break;
             }
         }
@@ -144,22 +153,29 @@ int poc_tcp_connect(poc_ctx_t *ctx)
     return POC_OK;
 }
 
+/* Idempotent under concurrent calls: poc_disconnect on the caller
+ * thread and io_start_reconnect on the I/O thread can both race here.
+ * Take sig_mutex, atomically claim each resource into a local, NULL
+ * the field, then free outside the lock (SSL_shutdown can do I/O). */
 void poc_tcp_close(poc_ctx_t *ctx)
 {
-    if (ctx->ssl) {
-        SSL_shutdown(ctx->ssl);
-        SSL_free(ctx->ssl);
-        ctx->ssl = NULL;
-    }
-    if (ctx->ssl_ctx) {
-        SSL_CTX_free(ctx->ssl_ctx);
-        ctx->ssl_ctx = NULL;
-    }
-    if (ctx->tcp_fd >= 0) {
-        close(ctx->tcp_fd);
-        ctx->tcp_fd = -1;
-    }
+    pthread_mutex_lock(&ctx->sig_mutex);
+    SSL     *ssl     = ctx->ssl;     ctx->ssl     = NULL;
+    SSL_CTX *ssl_ctx = ctx->ssl_ctx; ctx->ssl_ctx = NULL;
+    int      fd      = ctx->tcp_fd;  ctx->tcp_fd  = -1;
     ctx->tcp_recv_len = 0;
+    pthread_mutex_unlock(&ctx->sig_mutex);
+
+    if (ssl) {
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+    }
+    if (ssl_ctx) {
+        SSL_CTX_free(ssl_ctx);
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
 }
 
 int poc_tcp_send_frame(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len)
@@ -191,7 +207,16 @@ int poc_tcp_send_frame(poc_ctx_t *ctx, const uint8_t *payload, uint16_t len)
                     usleep(1000);
                     continue;
                 }
-                poc_log_at(POC_LOG_ERROR, "TLS send error (SSL error %d)", err);
+                unsigned long e = ERR_peek_last_error();
+                char ebuf[256] = "";
+                if (e) ERR_error_string_n(e, ebuf, sizeof(ebuf));
+                poc_log_at(POC_LOG_ERROR,
+                           "TLS send error (ret=%d ssl_err=%d errno=%d: %s)",
+                           n, err, errno,
+                           ebuf[0] ? ebuf
+                                   : (err == SSL_ERROR_SYSCALL
+                                          ? strerror(errno) : "no openssl error"));
+                ERR_clear_error();
                 free(frame);
                 return POC_ERR_NETWORK;
             }
@@ -236,7 +261,19 @@ int poc_tcp_recv(poc_ctx_t *ctx)
                 poc_log_at(POC_LOG_WARNING, "TLS: connection closed by server");
                 return POC_ERR_NETWORK;
             }
-            poc_log_at(POC_LOG_ERROR, "TLS recv error (SSL error %d)", err);
+            /* Surface the real reason: SSL_ERROR_SSL (1) just means
+             * "look in the OpenSSL error queue", and SSL_ERROR_SYSCALL (5)
+             * means "look at errno". Without these the caller is blind. */
+            unsigned long e = ERR_peek_last_error();
+            char ebuf[256] = "";
+            if (e) ERR_error_string_n(e, ebuf, sizeof(ebuf));
+            poc_log_at(POC_LOG_ERROR,
+                       "TLS recv error (ret=%d ssl_err=%d errno=%d: %s)",
+                       n, err, errno,
+                       ebuf[0] ? ebuf
+                               : (err == SSL_ERROR_SYSCALL
+                                      ? strerror(errno) : "no openssl error"));
+            ERR_clear_error();
             return POC_ERR_NETWORK;
         }
     } else {
