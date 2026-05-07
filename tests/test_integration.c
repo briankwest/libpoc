@@ -541,13 +541,13 @@ static void test_audio_roundtrip(void)
     /* Let PTT start propagate to Bob so ptt_rx_active is set */
     poll_until2(alice, bob, t.srv, NULL, NULL, 500);
 
-    /* Generate and send 20 frames of 1kHz tone */
-    int16_t tone[160];
-    for (int i = 0; i < 160; i++)
-        tone[i] = (int16_t)(8000.0 * sin(2.0 * 3.14159265 * 1000.0 * i / 8000.0));
+    /* Generate and send 20 frames of 1kHz tone (Opus SWB, 24kHz, 480 samples). */
+    int16_t tone[POC_AUDIO_FRAME_SAMPLES];
+    for (int i = 0; i < POC_AUDIO_FRAME_SAMPLES; i++)
+        tone[i] = (int16_t)(8000.0 * sin(2.0 * 3.14159265 * 1000.0 * i / POC_AUDIO_RATE));
 
     for (int f = 0; f < 20; f++) {
-        poc_ptt_send_audio(alice, tone, 160);
+        poc_ptt_send_audio(alice, tone, POC_AUDIO_FRAME_SAMPLES);
         poll_until2(alice, bob, t.srv, NULL, NULL, 50);
     }
 
@@ -1039,12 +1039,12 @@ static void test_server_inject_audio(void)
     poc_server_start_ptt_for(t.srv, 100, 9999, "Injector");
     poll_until(bob, t.srv, NULL, NULL, 500);
 
-    int16_t tone[160];
-    for (int i = 0; i < 160; i++)
-        tone[i] = (int16_t)(8000.0 * sin(2.0 * 3.14159265 * 1000.0 * i / 8000.0));
+    int16_t tone[POC_AUDIO_FRAME_SAMPLES];
+    for (int i = 0; i < POC_AUDIO_FRAME_SAMPLES; i++)
+        tone[i] = (int16_t)(8000.0 * sin(2.0 * 3.14159265 * 1000.0 * i / POC_AUDIO_RATE));
 
     for (int f = 0; f < 20; f++) {
-        poc_server_inject_audio(t.srv, 100, 9999, tone, 160);
+        poc_server_inject_audio(t.srv, 100, 9999, tone, POC_AUDIO_FRAME_SAMPLES);
         poll_until(bob, t.srv, NULL, NULL, 50);
     }
 
