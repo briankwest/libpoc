@@ -88,6 +88,15 @@ typedef struct {
                      uint32_t group_id, const int16_t *pcm,
                      int n_samples, void *ud);
 
+    /* Push token — fires when a client sends CMD_REGISTER_PUSH_TOKEN.
+     * Called from the same thread as on_audio. The implementation
+     * is responsible for caching the (uid → token, bundle_id)
+     * mapping for subsequent APNs delivery. `token` and `bundle_id`
+     * pointers are valid only for the duration of the callback. */
+    void (*on_push_token)(poc_server_t *srv, uint32_t user_id,
+                          const uint8_t *token, int token_len,
+                          const char *bundle_id, void *ud);
+
     void *userdata;
 } poc_server_callbacks_t;
 

@@ -38,6 +38,8 @@ typedef enum {
     POC_EVT_TYPING,
     /* Server-side: decoded audio from PoC client */
     POC_EVT_AUDIO,
+    /* Server-side: client registered an APNs push token */
+    POC_EVT_PUSH_TOKEN,
 } poc_evt_type_t;
 
 typedef struct {
@@ -61,6 +63,10 @@ typedef struct {
         struct { uint32_t speaker_id; uint32_t group_id;
                  int n_samples;
                  int16_t pcm[POC_CODEC_MAX_FRAME_SAMPLES]; } audio;
+        struct { uint32_t user_id;
+                 uint8_t  token[64];
+                 uint8_t  token_len;
+                 char     bundle_id[128]; } push_token;
     };
 } poc_event_t;
 

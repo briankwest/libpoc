@@ -255,4 +255,49 @@ void test_msg_build(void)
         test_assert(memcmp(buf + 10, "test", 4) == 0, "text at offset 10");
         free(ctx);
     }
+
+    /* register_push_token */
+    {
+        test_begin("register_push_token: cmd byte is 0x90");
+        poc_ctx_t *ctx = make_ctx();
+        ctx->user_id = 1001;
+        uint8_t token[32];
+        for (int i = 0; i < 32; i++) token[i] = (uint8_t)(0xA0 + i);
+        const char *bid = "net.kerchunk.ios";
+        uint8_t buf[256];
+        int len = poc_build_register_push_token(ctx, token, 32, bid,
+                                                buf, sizeof(buf));
+        int expected = 8 + 32 + (int)strlen(bid);
+        test_assert(len == expected, "length = 8 + token_len + bid_len");
+        test_assert(buf[5] == CMD_REGISTER_PUSH_TOKEN, "cmd byte 0x90");
+        test_assert(buf[6] == 32, "token_len at offset 6");
+        test_assert(buf[7] == (uint8_t)strlen(bid), "bid_len at offset 7");
+        test_assert(memcmp(buf + 8, token, 32) == 0, "token bytes at offset 8");
+        test_assert(memcmp(buf + 8 + 32, bid, strlen(bid)) == 0,
+                    "bundle_id bytes after token");
+        test_assert(poc_read32(buf + 1) == 1001, "user_id at offset 1");
+        free(ctx);
+    }
+
+    {
+        test_begin("register_push_token: rejects oversized token");
+        poc_ctx_t *ctx = make_ctx();
+        uint8_t token[200] = {0};
+        uint8_t buf[256];
+        int len = poc_build_register_push_token(ctx, token, 65,
+                                                "x", buf, sizeof(buf));
+        test_assert(len < 0, "should reject token_len > 64");
+        free(ctx);
+    }
+
+    {
+        test_begin("register_push_token: rejects empty bundle_id");
+        poc_ctx_t *ctx = make_ctx();
+        uint8_t token[32] = {0};
+        uint8_t buf[256];
+        int len = poc_build_register_push_token(ctx, token, 32,
+                                                "", buf, sizeof(buf));
+        test_assert(len < 0, "should reject empty bundle_id");
+        free(ctx);
+    }
 }

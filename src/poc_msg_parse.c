@@ -387,6 +387,11 @@ static void handle_user_data(poc_ctx_t *ctx, const uint8_t *data, int len)
         poc_udp_send(ctx, &ping, 1);
     }
 
+    /* Re-send the cached APNs push token (if any) so the server's
+     * (uid → token) map survives reconnects. No-op if poc_set_push_token
+     * was never called. */
+    poc_resend_push_token_if_set(ctx);
+
     /* Parse group list: [0-1] count (big-endian), then per group:
      * [4 bytes] group_id, [1 byte] name_len, [N bytes] name */
     int off = 0;

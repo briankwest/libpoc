@@ -63,6 +63,7 @@ const char *poc_cmd_name(uint8_t cmd)
     case 0x70: return "note_income";
     case 0x72: return "voice_income";
     case 0x73: return "voice_message";
+    case 0x90: return "register_push_token";
     default:   return "unknown";
     }
 }

@@ -34,6 +34,7 @@
 #define POC_CMD_NOTE_INCOME          0x70
 #define POC_CMD_VOICE_INCOME         0x72
 #define POC_CMD_VOICE_MESSAGE        0x73
+#define POC_CMD_REGISTER_PUSH_TOKEN  0x90  /* libpoc 1.1+ extension */
 
 /* ── Server → Client notification types (byte at offset 1) ──────── */
 

@@ -645,7 +645,8 @@ int poc_poll(poc_ctx_t *ctx, int timeout_ms)
                 ctx->cb.on_typing(ctx, evt.typing.user_id, evt.typing.typing, ctx->cb.userdata);
             break;
         case POC_EVT_AUDIO:
-            break;  /* server-only event, not used in client context */
+        case POC_EVT_PUSH_TOKEN:
+            break;  /* server-only events, not used in client context */
         }
     }
 
@@ -1074,4 +1075,74 @@ int poc_request_voice_message(poc_ctx_t *ctx, uint64_t note_id)
     poc_write32(buf + off, (uint32_t)(note_id >> 32)); off += 4;
     poc_write32(buf + off, (uint32_t)(note_id & 0xFFFFFFFF)); off += 4;
     return locked_tcp_send(ctx, buf, off);
+}
+
+/* ── APNs push token (Apple PushToTalk framework support) ──────── */
+
+/* Send the cached token over TCP. Caller must hold sig_mutex iff
+ * the token fields could be raced against. Used both directly from
+ * poc_set_push_token() and from poc_resend_push_token_if_set(). */
+static int send_cached_push_token_locked(poc_ctx_t *ctx)
+{
+    if (ctx->push_token_len == 0) return POC_OK;
+    if (atomic_load(&ctx->state) != POC_STATE_ONLINE) return POC_OK;
+
+    uint8_t buf[8 + sizeof(ctx->push_token) + sizeof(ctx->push_bundle_id)];
+    int len = poc_build_register_push_token(ctx,
+                                            ctx->push_token,
+                                            ctx->push_token_len,
+                                            ctx->push_bundle_id,
+                                            buf, sizeof(buf));
+    if (len < 0) return POC_ERR;
+    return poc_tcp_send_frame(ctx, buf, (uint16_t)len);
+}
+
+int poc_set_push_token(poc_ctx_t *ctx,
+                       const uint8_t *token, size_t token_len,
+                       const char *bundle_id)
+{
+    if (!ctx) return POC_ERR_STATE;
+    if (!token || token_len == 0 || token_len > sizeof(ctx->push_token))
+        return POC_ERR;
+    if (!bundle_id || !bundle_id[0]) return POC_ERR;
+    size_t bid_len = strlen(bundle_id);
+    if (bid_len >= sizeof(ctx->push_bundle_id)) return POC_ERR;
+
+    pthread_mutex_lock(&ctx->sig_mutex);
+    memcpy(ctx->push_token, token, token_len);
+    ctx->push_token_len = (uint8_t)token_len;
+    snprintf(ctx->push_bundle_id, sizeof(ctx->push_bundle_id), "%s", bundle_id);
+    int rc = send_cached_push_token_locked(ctx);
+    pthread_mutex_unlock(&ctx->sig_mutex);
+
+    poc_log("push: cached APNs token (%zu bytes, bundle=%s, sent=%d)",
+            token_len, bundle_id, rc == POC_OK ? 1 : 0);
+    return POC_OK;
+}
+
+size_t poc_get_push_token(const poc_ctx_t *ctx, uint8_t *out, size_t out_max)
+{
+    if (!ctx) return 0;
+    pthread_mutex_lock(&((poc_ctx_t *)ctx)->sig_mutex);
+    size_t n = ctx->push_token_len;
+    if (out && n > 0 && out_max >= n)
+        memcpy(out, ctx->push_token, n);
+    pthread_mutex_unlock(&((poc_ctx_t *)ctx)->sig_mutex);
+    return n;
+}
+
+void poc_resend_push_token_if_set(poc_ctx_t *ctx)
+{
+    if (!ctx) return;
+    /* Fast path: no token cached → nothing to do. Avoids touching
+     * sig_mutex on the post-login critical path for clients that
+     * never call poc_set_push_token (the vast majority — only iOS
+     * PT-framework apps register push tokens). */
+    if (ctx->push_token_len == 0) return;
+    pthread_mutex_lock(&ctx->sig_mutex);
+    if (ctx->push_token_len > 0) {
+        int rc = send_cached_push_token_locked(ctx);
+        poc_log("push: re-sent cached APNs token after reconnect (rc=%d)", rc);
+    }
+    pthread_mutex_unlock(&ctx->sig_mutex);
 }

@@ -69,6 +69,7 @@
 #define CMD_VOICE_MESSAGE        0x73
 #define CMD_RECV_CONTENT         0x80
 #define CMD_RECV_MCAST           0x84
+#define CMD_REGISTER_PUSH_TOKEN  0x90   /* libpoc 1.1+ — APNs token from iOS */
 
 /* ── UDP packet header ──────────────────────────────────────────── */
 
@@ -218,6 +219,14 @@ struct poc_ctx {
     /* Receive jitter buffer (I/O thread only) */
     poc_jb_t        jb;
 
+    /* Cached APNs push token (set via poc_set_push_token()).
+     * Re-sent automatically each time login transitions to ONLINE
+     * so the server-side mapping survives reconnects. Protected
+     * by sig_mutex. token_len == 0 means "no token cached". */
+    uint8_t         push_token[64];     /* Apple PT tokens are 32 B */
+    uint8_t         push_token_len;
+    char            push_bundle_id[128];
+
     /* GPS (written by caller, read by I/O thread) */
     float           gps_lat;
     float           gps_lng;
@@ -318,5 +327,13 @@ int         poc_build_send_user_msg(poc_ctx_t *ctx, uint32_t user_id,
                                     const char *text, uint8_t *buf, int buflen);
 int         poc_build_send_group_msg(poc_ctx_t *ctx, uint32_t group_id,
                                      const char *text, uint8_t *buf, int buflen);
+int         poc_build_register_push_token(poc_ctx_t *ctx,
+                                          const uint8_t *token, int token_len,
+                                          const char *bundle_id,
+                                          uint8_t *buf, int buflen);
+
+/* poc_ctx.c — internal helper, called after login completes so the
+ * cached push token survives reconnects. */
+void        poc_resend_push_token_if_set(poc_ctx_t *ctx);
 
 #endif /* POC_INTERNAL_H */

@@ -674,6 +674,32 @@ static void srv_dispatch(poc_server_t *srv, int cl_idx, const uint8_t *data, int
     case POC_CMD_MOD_STATUS:
         if (len >= 7) srv_status_broadcast(srv, cl->user_id, data[6], cl->fd);
         break;
+    case POC_CMD_REGISTER_PUSH_TOKEN: {
+        /* [6] token_len, [7] bid_len, [8..] token, [..] bundle_id */
+        if (len < 8) break;
+        int token_len = data[6];
+        int bid_len   = data[7];
+        if (token_len <= 0 || token_len > 64) break;
+        if (bid_len   <= 0 || bid_len   > 127) break;
+        if (8 + token_len + bid_len > len) break;
+        const uint8_t *token = data + 8;
+        const uint8_t *bundle_raw = data + 8 + token_len;
+
+        poc_event_t evt = { .type = POC_EVT_PUSH_TOKEN };
+        evt.push_token.user_id   = cl->user_id;
+        evt.push_token.token_len = (uint8_t)token_len;
+        memcpy(evt.push_token.token, token, (size_t)token_len);
+        int copy_len = bid_len < (int)sizeof(evt.push_token.bundle_id) - 1
+                       ? bid_len : (int)sizeof(evt.push_token.bundle_id) - 1;
+        memcpy(evt.push_token.bundle_id, bundle_raw, (size_t)copy_len);
+        evt.push_token.bundle_id[copy_len] = '\0';
+        poc_evt_push(&srv->evt_queue, &evt);
+
+        poc_log_at(POC_LOG_INFO,
+                   "srv: %s (uid %u) registered APNs push token (%d bytes, bundle=%s)",
+                   cl->account, cl->user_id, token_len, evt.push_token.bundle_id);
+        break;
+    }
 
     /* Temp groups */
     case POC_CMD_INVITE_TMP:
@@ -1308,6 +1334,14 @@ int poc_server_poll(poc_server_t *srv, int timeout_ms)
             if (srv->cb.on_audio)
                 srv->cb.on_audio(srv, evt.audio.speaker_id, evt.audio.group_id,
                                  evt.audio.pcm, evt.audio.n_samples, srv->cb.userdata);
+            break;
+        case POC_EVT_PUSH_TOKEN:
+            if (srv->cb.on_push_token)
+                srv->cb.on_push_token(srv, evt.push_token.user_id,
+                                      evt.push_token.token,
+                                      evt.push_token.token_len,
+                                      evt.push_token.bundle_id,
+                                      srv->cb.userdata);
             break;
         default:
             break;

@@ -212,6 +212,32 @@ int  poc_cancel_sos(poc_ctx_t *ctx);
 
 int  poc_request_voice_message(poc_ctx_t *ctx, uint64_t note_id);
 
+/* ── Apple Push Notification (PushToTalk framework) ─────────────── */
+
+/* Register an Apple Push Notification token for this client.
+ *
+ * `token` is the raw bytes from the iOS PTChannelManagerDelegate's
+ * receivedEphemeralPushToken callback (NOT hex-encoded).
+ * `bundle_id` is the iOS app's bundle identifier (the ".voip-ptt"
+ * suffix is appended server-side by the APNs sender).
+ *
+ * Cached on the ctx and re-sent automatically after every reconnect
+ * (when login transitions to ONLINE). Safe to call from any thread
+ * and safe to call before the connection is fully established —
+ * the cache survives until poc_destroy().
+ *
+ * Returns POC_OK on success, POC_ERR_STATE if ctx is NULL,
+ * POC_ERR if token_len or bundle_id are out of range. */
+int poc_set_push_token(poc_ctx_t *ctx,
+                       const uint8_t *token, size_t token_len,
+                       const char *bundle_id);
+
+/* Inspection helper for tests/diagnostics. Returns the cached token
+ * length (0 if none set). If `out` is non-NULL and `out_max` fits,
+ * copies the cached token into it. */
+size_t poc_get_push_token(const poc_ctx_t *ctx,
+                          uint8_t *out, size_t out_max);
+
 /* ── Encryption ─────────────────────────────────────────────────── */
 
 bool poc_is_encrypted(const poc_ctx_t *ctx);

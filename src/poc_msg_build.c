@@ -259,3 +259,42 @@ int poc_build_send_group_msg(poc_ctx_t *ctx, uint32_t group_id,
 
     return total;
 }
+
+/*
+ * Register APNs push token (libpoc 1.1+ extension, cmd 0x90):
+ *   [0]    session_id
+ *   [1-4]  user_id
+ *   [5]    cmd = 0x90
+ *   [6]    token_len (uint8) — Apple PT tokens are 32 bytes
+ *   [7]    bundle_id_len (uint8) — without trailing NUL
+ *   [8..]  token bytes (raw, NOT hex)
+ *   [..]   bundle_id bytes (ASCII, NO NUL terminator)
+ *
+ * Server stores this as a (user_id → token, bundle_id) mapping for
+ * later APNs delivery on PTT_START.
+ */
+int poc_build_register_push_token(poc_ctx_t *ctx,
+                                  const uint8_t *token, int token_len,
+                                  const char *bundle_id,
+                                  uint8_t *buf, int buflen)
+{
+    if (!token || token_len <= 0 || token_len > 64)
+        return POC_ERR;
+    int bid_len = bundle_id ? (int)strlen(bundle_id) : 0;
+    if (bid_len <= 0 || bid_len > 255)
+        return POC_ERR;
+
+    int total = 8 + token_len + bid_len;
+    if (total > buflen)
+        return POC_ERR;
+
+    buf[0] = ctx->session_id;
+    poc_write32(buf + 1, ctx->user_id);
+    buf[5] = CMD_REGISTER_PUSH_TOKEN;
+    buf[6] = (uint8_t)token_len;
+    buf[7] = (uint8_t)bid_len;
+    memcpy(buf + 8, token, token_len);
+    memcpy(buf + 8 + token_len, bundle_id, bid_len);
+
+    return total;
+}
