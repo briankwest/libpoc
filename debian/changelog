@@ -1,3 +1,13 @@
+libpoc (1.1.1-1) unstable; urgency=low
+
+  * push: defer APNs token send until POC_STATE_ONLINE.
+    Pre-auth 0x90 frames raced into the login state machine and
+    deadlocked the I/O thread because poc_resend_push_token_if_set
+    relocked the sig_mutex its caller already held; both behaviors
+    are fixed. Public API unchanged.
+
+ -- Brian West <brian@kerchunk.net>  Thu, 08 May 2026 16:00:00 +0000
+
 libpoc (1.1.0-1) unstable; urgency=low
 
   * Opus-only audio. Speex NB/WB/UWB, G.711 PCMU/PCMA removed.

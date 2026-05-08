@@ -332,8 +332,11 @@ int         poc_build_register_push_token(poc_ctx_t *ctx,
                                           const char *bundle_id,
                                           uint8_t *buf, int buflen);
 
-/* poc_ctx.c — internal helper, called after login completes so the
- * cached push token survives reconnects. */
-void        poc_resend_push_token_if_set(poc_ctx_t *ctx);
+/* poc_ctx.c — internal helper, called from the I/O thread the moment
+ * login transitions to POC_STATE_ONLINE so any push token the caller
+ * cached pre-login is flushed to the wire. Caller MUST already hold
+ * ctx->sig_mutex (poc_parse_message holds it across dispatch — re-
+ * locking would deadlock). */
+void        poc_resend_push_token_if_set_locked(poc_ctx_t *ctx);
 
 #endif /* POC_INTERNAL_H */

@@ -1079,14 +1079,13 @@ int poc_request_voice_message(poc_ctx_t *ctx, uint64_t note_id)
 
 /* ── APNs push token (Apple PushToTalk framework support) ──────── */
 
-/* Send the cached token over TCP. Caller must hold sig_mutex iff
- * the token fields could be raced against. Used both directly from
- * poc_set_push_token() and from poc_resend_push_token_if_set(). */
+/* Build and send the cached token frame. Caller MUST hold sig_mutex
+ * AND must have verified state == POC_STATE_ONLINE. Internal helper
+ * shared by poc_set_push_token() (when called post-login) and
+ * poc_resend_push_token_if_set_locked() (called from the I/O thread
+ * right after login transitions to ONLINE). */
 static int send_cached_push_token_locked(poc_ctx_t *ctx)
 {
-    if (ctx->push_token_len == 0) return POC_OK;
-    if (atomic_load(&ctx->state) != POC_STATE_ONLINE) return POC_OK;
-
     uint8_t buf[8 + sizeof(ctx->push_token) + sizeof(ctx->push_bundle_id)];
     int len = poc_build_register_push_token(ctx,
                                             ctx->push_token,
@@ -1112,11 +1111,28 @@ int poc_set_push_token(poc_ctx_t *ctx,
     memcpy(ctx->push_token, token, token_len);
     ctx->push_token_len = (uint8_t)token_len;
     snprintf(ctx->push_bundle_id, sizeof(ctx->push_bundle_id), "%s", bundle_id);
-    int rc = send_cached_push_token_locked(ctx);
+
+    /* Only flush to wire if the session is fully online. Pre-auth
+     * 0x90 frames break some servers' login state machines (the
+     * server is mid-handshake and has no place to dispatch them).
+     * If we're not ONLINE yet, the cache will be flushed by
+     * poc_resend_push_token_if_set_locked() the moment user_data
+     * arrives and login transitions to ONLINE. */
+    int online = (atomic_load(&ctx->state) == POC_STATE_ONLINE);
+    int sent_ok = 0;
+    if (online)
+        sent_ok = (send_cached_push_token_locked(ctx) == POC_OK);
     pthread_mutex_unlock(&ctx->sig_mutex);
 
-    poc_log("push: cached APNs token (%zu bytes, bundle=%s, sent=%d)",
-            token_len, bundle_id, rc == POC_OK ? 1 : 0);
+    if (online && sent_ok)
+        poc_log("push: cached and sent APNs token (%zu B, bundle=%s)",
+                token_len, bundle_id);
+    else if (online)
+        poc_log("push: cached APNs token but TCP send failed (%zu B, bundle=%s)",
+                token_len, bundle_id);
+    else
+        poc_log("push: cached APNs token, deferred until ONLINE "
+                "(%zu B, bundle=%s)", token_len, bundle_id);
     return POC_OK;
 }
 
@@ -1131,18 +1147,16 @@ size_t poc_get_push_token(const poc_ctx_t *ctx, uint8_t *out, size_t out_max)
     return n;
 }
 
-void poc_resend_push_token_if_set(poc_ctx_t *ctx)
+/* Caller MUST hold sig_mutex. Called from handle_user_data() in the
+ * I/O thread right after state transitions to POC_STATE_ONLINE; the
+ * outer poc_parse_message() already owns the lock, so this helper
+ * cannot relock without deadlocking the I/O thread. */
+void poc_resend_push_token_if_set_locked(poc_ctx_t *ctx)
 {
-    if (!ctx) return;
-    /* Fast path: no token cached → nothing to do. Avoids touching
-     * sig_mutex on the post-login critical path for clients that
-     * never call poc_set_push_token (the vast majority — only iOS
-     * PT-framework apps register push tokens). */
-    if (ctx->push_token_len == 0) return;
-    pthread_mutex_lock(&ctx->sig_mutex);
-    if (ctx->push_token_len > 0) {
-        int rc = send_cached_push_token_locked(ctx);
-        poc_log("push: re-sent cached APNs token after reconnect (rc=%d)", rc);
-    }
-    pthread_mutex_unlock(&ctx->sig_mutex);
+    if (!ctx || ctx->push_token_len == 0) return;
+    if (atomic_load(&ctx->state) != POC_STATE_ONLINE) return;
+
+    int rc = send_cached_push_token_locked(ctx);
+    poc_log("push: re-sent cached APNs token after login (rc=%d, %u B)",
+            rc, (unsigned)ctx->push_token_len);
 }
