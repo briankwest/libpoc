@@ -112,6 +112,50 @@ static int srv_find_group_idx(poc_server_t *srv, uint32_t gid)
     return -1;
 }
 
+/* Push a UDP audio packet into the group's replay ring. Caller must
+ * have already built the full UDP wire packet (header + Opus payload).
+ * Oldest entries are evicted when the ring fills. */
+static void srv_replay_push(srv_group_t *g, const uint8_t *pkt, int len)
+{
+    if (!g || len <= 0 || len > SRV_REPLAY_PKT_MAX) return;
+    pthread_mutex_lock(&g->replay_mu);
+    int slot = g->replay_head;
+    memcpy(g->replay_pkt[slot], pkt, (size_t)len);
+    g->replay_len[slot] = (uint16_t)len;
+    g->replay_head = (slot + 1) % SRV_REPLAY_DEPTH;
+    if (g->replay_count < SRV_REPLAY_DEPTH) g->replay_count++;
+    g->replay_last_write_ms = poc_mono_ms();
+    pthread_mutex_unlock(&g->replay_mu);
+}
+
+/* Drain the group's replay ring to a single client (oldest packet
+ * first). Skipped if the ring is empty or its last write was more
+ * than SRV_REPLAY_FRESH_MS ago — we only catch up active broadcasts.
+ * Returns the number of packets sent. */
+static int srv_replay_drain(poc_server_t *srv, srv_group_t *g, srv_client_t *cl)
+{
+    int sent = 0;
+    pthread_mutex_lock(&g->replay_mu);
+    int n = g->replay_count;
+    if (n > 0) {
+        int64_t age = poc_mono_ms() - g->replay_last_write_ms;
+        if (age > SRV_REPLAY_FRESH_MS) n = 0;
+    }
+    if (n > 0) {
+        int start = (g->replay_head - n + SRV_REPLAY_DEPTH) % SRV_REPLAY_DEPTH;
+        for (int i = 0; i < n; i++) {
+            int idx = (start + i) % SRV_REPLAY_DEPTH;
+            ssize_t rc = sendto(srv->udp_fd,
+                                g->replay_pkt[idx], g->replay_len[idx], 0,
+                                (struct sockaddr *)&cl->udp_addr,
+                                sizeof(cl->udp_addr));
+            if (rc > 0) sent++;
+        }
+    }
+    pthread_mutex_unlock(&g->replay_mu);
+    return sent;
+}
+
 static void srv_status_broadcast(poc_server_t *srv, uint32_t user_id, int status, int exclude_fd)
 {
     uint8_t msg[8];
@@ -818,14 +862,54 @@ static void srv_handle_udp(poc_server_t *srv)
         recv_count++;
         uint32_t sender_id = poc_read32(pkt + 2);
         srv_client_t *sender = NULL;
+        bool was_first_udp = false;
         for (int i = 0; i < srv->client_count; i++) {
             if (srv->clients[i].user_id == sender_id &&
                 srv->clients[i].state == SRV_CLIENT_ONLINE) {
                 sender = &srv->clients[i];
+                /* Log NAT remap / source-port change so we can tell
+                 * stale-route problems apart from no-route ones in a
+                 * post-mortem. Suppressed on first packet (had_addr
+                 * was false) and on identical re-binds. */
+                if (sender->has_udp_addr &&
+                    (sender->udp_addr.sin_addr.s_addr != from.sin_addr.s_addr ||
+                     sender->udp_addr.sin_port != from.sin_port)) {
+                    char old_a[INET_ADDRSTRLEN], new_a[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &sender->udp_addr.sin_addr, old_a, sizeof(old_a));
+                    inet_ntop(AF_INET, &from.sin_addr, new_a, sizeof(new_a));
+                    poc_log_at(POC_LOG_INFO,
+                               "srv: uid=%u udp source changed, "
+                               "was=%s:%u now=%s:%u",
+                               sender_id,
+                               old_a, ntohs(sender->udp_addr.sin_port),
+                               new_a, ntohs(from.sin_port));
+                }
+                was_first_udp = !sender->has_udp_addr;
                 sender->udp_addr = from;
                 sender->has_udp_addr = true;
                 sender->last_audio_time = poc_mono_ms();
                 break;
+            }
+        }
+        /* Late-joiner replay. The first UDP packet from a client whose
+         * group is mid-broadcast triggers a catch-up of the group's
+         * replay ring. Typical case: iOS PT framework woke the app via
+         * APNs while RF is keyed; without this, iOS misses the head
+         * of the transmission entirely. */
+        if (was_first_udp && sender && sender->active_group) {
+            int gidx = srv_find_group_idx(srv, sender->active_group);
+            if (gidx >= 0) {
+                int n = srv_replay_drain(srv, &srv->groups[gidx], sender);
+                if (n > 0) {
+                    char addr[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &sender->udp_addr.sin_addr,
+                              addr, sizeof(addr));
+                    poc_log_at(POC_LOG_INFO,
+                               "srv: replayed %d packets to late-joiner "
+                               "uid=%u (group=%u, dest=%s:%u)",
+                               n, sender_id, sender->active_group,
+                               addr, ntohs(sender->udp_addr.sin_port));
+                }
             }
         }
         if (!sender) {
@@ -1110,8 +1194,10 @@ void poc_server_destroy(poc_server_t *srv)
     poc_codec_destroy(srv->codec);
     if (srv->ssl_ctx) { SSL_CTX_free(srv->ssl_ctx); srv->ssl_ctx = NULL; }
     /* Free group member arrays */
-    for (int i = 0; i < srv->group_count; i++)
+    for (int i = 0; i < srv->group_count; i++) {
         free(srv->groups[i].members);
+        pthread_mutex_destroy(&srv->groups[i].replay_mu);
+    }
     free(srv->clients);
     free(srv->users);
     free(srv->groups);
@@ -1155,6 +1241,10 @@ int poc_server_add_group(poc_server_t *srv, const poc_server_group_t *group)
     g->members = NULL;
     g->member_count = 0;
     g->member_cap = 0;
+    pthread_mutex_init(&g->replay_mu, NULL);
+    g->replay_head = 0;
+    g->replay_count = 0;
+    g->replay_last_write_ms = 0;
     if (group->member_ids && group->member_count > 0) {
         g->members = malloc(group->member_count * sizeof(uint32_t));
         if (g->members) {
@@ -1184,6 +1274,7 @@ int poc_server_remove_group(poc_server_t *srv, uint32_t group_id)
     for (int i = 0; i < srv->group_count; i++) {
         if (srv->groups[i].id == group_id) {
             free(srv->groups[i].members);
+            pthread_mutex_destroy(&srv->groups[i].replay_mu);
             srv->groups[i] = srv->groups[--srv->group_count];
             return POC_OK;
         }
@@ -1372,6 +1463,14 @@ int poc_server_inject_audio(poc_server_t *srv, uint32_t group_id,
     pkt[7] = 0x80;  /* content type: audio */
     memcpy(pkt + POC_UDP_HDR_LEN, encoded, enc_len);
     int pkt_len = POC_UDP_HDR_LEN + enc_len;
+
+    /* Stash the wire packet in the group's replay ring before sending
+     * — late joiners (e.g. iOS waking via APNs) will get a catch-up
+     * burst when their first UDP punch arrives. */
+    {
+        int gidx = srv_find_group_idx(srv, group_id);
+        if (gidx >= 0) srv_replay_push(&srv->groups[gidx], pkt, pkt_len);
+    }
 
     /* Send to all clients in the group */
     int eligible = 0, sent = 0, no_udp = 0, wrong_group = 0, offline = 0;

@@ -1,3 +1,14 @@
+libpoc (1.1.2-1) unstable; urgency=low
+
+  * srv: per-group replay ring (last 2 s) drained to a client on its
+    first UDP punch when the group is mid-broadcast. Late joiners
+    (e.g. iOS waking via APNs while RF is keyed) no longer miss the
+    head of the transmission.
+  * srv: log NAT remap / source-port change on incoming UDP — gives
+    a clear signal when iOS reconnects from a fresh NAT pinhole.
+
+ -- Brian West <brian@kerchunk.net>  Fri, 09 May 2026 14:00:00 +0000
+
 libpoc (1.1.1-1) unstable; urgency=low
 
   * push: defer APNs token send until POC_STATE_ONLINE.

@@ -26,6 +26,15 @@
 #define SRV_PTT_FLOOR_TIMEOUT_MS 60000   /* 60s max floor hold without audio */
 #define SRV_EPOLL_BATCH          64      /* max events per epoll_wait call */
 
+/* Per-group replay ring for late joiners (e.g. iOS PT clients waking
+ * via APNs while the radio is mid-transmission). Holds the most
+ * recent UDP audio packets pushed via poc_server_inject_audio so the
+ * first UDP punch from a freshly-reconnected client triggers a
+ * catch-up burst before live audio resumes. */
+#define SRV_REPLAY_DEPTH         100     /* 100 × 20 ms = 2.0 s */
+#define SRV_REPLAY_PKT_MAX       256     /* 8 B header + Opus SWB enc */
+#define SRV_REPLAY_FRESH_MS      500     /* skip replay if last write older */
+
 typedef enum {
     SRV_CLIENT_NEW,
     SRV_CLIENT_CHALLENGED,
@@ -72,6 +81,16 @@ typedef struct {
     int       member_count;
     int       member_cap;    /* allocated capacity */
     int       floor_holder;  /* client index, -1 = free */
+
+    /* Replay ring — protected by replay_mu. Written from any thread
+     * that calls poc_server_inject_audio (kerchunk audio thread in
+     * mod_poc); read from the I/O thread when a UDP punch arrives. */
+    pthread_mutex_t replay_mu;
+    uint8_t   replay_pkt[SRV_REPLAY_DEPTH][SRV_REPLAY_PKT_MAX];
+    uint16_t  replay_len[SRV_REPLAY_DEPTH];
+    int       replay_head;            /* next slot to write */
+    int       replay_count;           /* 0..SRV_REPLAY_DEPTH */
+    int64_t   replay_last_write_ms;   /* poc_mono_ms() of last push */
 } srv_group_t;
 
 struct poc_server {
